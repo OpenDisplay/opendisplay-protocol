@@ -19,9 +19,9 @@
  *   type mirrors (see docs/shared-types-plan.md); codegen must carry the prose
  *   through as idiomatic doc comments in each target language.
  *
- *   OD_STRUCTS_VERSION  2.0   (MAJOR.MINOR spec marker for THIS file; see
+ *   OD_STRUCTS_VERSION  2.1   (MAJOR.MINOR spec marker for THIS file; see
  *                              VERSIONING POLICY below -- NOT sent on the wire)
- *   LAST CHANGED        2026-07-18
+ *   LAST CHANGED        2026-08-30
  *
  *   The two version schemes carried here are DISTINCT (see §6 Q2 of the plan):
  *     - OD_STRUCTS_VERSION_* : documents this spec file, like protocol.h's
@@ -66,7 +66,23 @@
  * CHANGELOG  (newest first; entries accrue under "Unreleased" and roll into a
  *            new version heading on each bump -- see AGENT INSTRUCTIONS below)
  * --------------------------------------------------------------------------
- *   Unreleased (since 2.0)
+ *   Unreleased (since 2.1)
+ *     - LedFlags bit4: OD_LED_FLAG_BUTTON_PRESS (short LED flash on physical
+ *       button press / button-wake synthetic click; default off).
+ *     - BuzzerFlags bit1: OD_BUZZER_FLAG_BUTTON_PRESS (short chirp on physical
+ *       button press / button-wake synthetic click; default off).
+ *     - MsdStatusBits bit3: OD_MSD_STATUS_ENCRYPTION_ENABLED (1 = app-layer
+ *       encryption active). Firmware sets it when encryption_enabled and master
+ *       key are non-zero; dynamic[11] is all 0xFF when no display is configured.
+ *       (Folded back from the Firmware side, PR #157 — parity restore.)
+ *     - Add each payload-layout change here as it lands. On the next version bump,
+ *       move these under a new "MAJOR.MINOR (YYYY-MM-DD)" heading.
+ *
+ *   2.1  (2026-08-30)
+ *     - Add PanelIC value OD_PANEL_IC_M5PAPERS3_960X540 = 3004 (M5Stack PaperS3,
+ *       ED047TC1-class 960x540 parallel panel, 16-gray capable; FastEPD native
+ *       parallel path). Backward-compatible enum addition (@since 1.5); the
+ *       on-wire config-format minor bumps 4 -> 5 (OD_CONFIG_MINOR_VERSION).
  *     - Doc-only: fixed two comment shapes the codegen parser mis-read and added
  *       the CODEGEN AUTHORING RULES banner section to prevent recurrence. Split the
  *       combined BusFlags/PinBitmap @bits comment into one comment per group; folded
@@ -76,8 +92,6 @@
  *       placeholder macros (no wire change; these bits stay reserved-must-be-0):
  *       TransmissionModes bit5/bit6 -> OD_TRANSMISSION_MODE_RESERVED_5/_6;
  *       MsdStatusBits bit3 -> OD_MSD_STATUS_RESERVED_3. Documentation only.
- *     - Add each payload-layout change here as it lands. On the next version bump,
- *       move these under a new "MAJOR.MINOR (YYYY-MM-DD)" heading.
  *
  *   2.0  (2026-07-18)
  *     - Initial canonical shared payload contract: the wire-payload counterpart
@@ -245,8 +259,8 @@
 /* Payload-spec revision, MAJOR.MINOR. Documents THIS file; NOT sent on the wire.
  * Distinct from the on-wire OD_CONFIG_VERSION pair defined in SECTION 1. */
 #define OD_STRUCTS_VERSION_MAJOR       2u
-#define OD_STRUCTS_VERSION_MINOR       0u
-#define OD_STRUCTS_VERSION_STR         "2.0"
+#define OD_STRUCTS_VERSION_MINOR       1u
+#define OD_STRUCTS_VERSION_STR         "2.1"
 
 /* --------------------------------------------------------------------------
  * Portable compile-time size check. Defined once here; every packed struct is
@@ -281,10 +295,10 @@
 
 /* On-wire config-format version. UNLIKE OD_STRUCTS_VERSION / OD_PROTOCOL_VERSION,
  * these ARE transmitted / negotiated: OuterPacketHeader.version carries the
- * MAJOR byte. Frozen at 1.4 by this header (the app's bundled config.yaml is at
+ * MAJOR byte. At 1.5 as of this header (the app's bundled config.yaml is at
  * minor 3 and must catch up). */
 #define OD_CONFIG_VERSION              1u   /* @doc "outer-packet major version byte" */
-#define OD_CONFIG_MINOR_VERSION        4u   /* @doc "config-format minor; backward-compatible additions" */
+#define OD_CONFIG_MINOR_VERSION        5u   /* @doc "config-format minor; backward-compatible additions" */
 
 /* CRC over the outer packet. CRC16-CCITT, poly 0x1021, init 0xFFFF, computed
  * over length+version+packets AS IF the 2-byte length field were 0x0000 (the
@@ -389,7 +403,8 @@ enum ICType {
     OD_IC_TYPE_NRF52811              = 5, /**< @doc "nRF52811-based boards" */
     OD_IC_TYPE_EFR32BG22C222F352GM40 = 6, /**< @doc "Silicon Labs EFR32BG22 boards" */
     OD_IC_TYPE_NRF54L15              = 7, /**< @doc "Seeed XIAO nRF54L15 (Zephyr)" */
-    OD_IC_TYPE_NRF54LM20             = 8  /**< @doc "Seeed XIAO nRF54LM20A (Zephyr)" */
+    OD_IC_TYPE_NRF54LM20             = 8, /**< @doc "Seeed XIAO nRF54LM20A (Zephyr)" */
+    OD_IC_TYPE_ESP32                 = 9  /**< @doc "Classic ESP32-based boards" */
 };
 
 /** @enum ManufacturerId  @width 2  @doc "Device manufacturer (ManufacturerData.manufacturer_id).
@@ -400,7 +415,8 @@ enum ManufacturerId {
     OD_MANUFACTURER_SEEED       = 1, /**< @doc "Seeed Studio" */
     OD_MANUFACTURER_WAVESHARE   = 2, /**< @doc "Waveshare Electronics" */
     OD_MANUFACTURER_SOL         = 3, /**< @doc "SOL" */
-    OD_MANUFACTURER_OPENDISPLAY = 4  /**< @doc "OpenDisplay (free giveaways only)" */
+    OD_MANUFACTURER_OPENDISPLAY = 4, /**< @doc "OpenDisplay (free giveaways only)" */
+    OD_MANUFACTURER_SOLDERED    = 5  /**< @doc "Soldered Electronics" */
 };
 
 /* SystemConfig.communication_modes @bits CommunicationModes (bits 3-7 reserved). */
@@ -557,7 +573,7 @@ enum ColorScheme {
 /** @enum PanelIC  @width 2
  *  @external bb_epaper (0-76 names track bb_epaper EP* panel identifiers); the
  *  1000-1030 range comes from the M3 / EPD-nRF5 driver line; 3000+ from the
- *  Seeed_GFX / OpenDisplay runtime. Wire values are OpenDisplay-OWNED; each
+ *  FastEPD IT8951 / OpenDisplay runtime. Wire values are OpenDisplay-OWNED; each
  *  firmware maps value -> its bb_epaper EP* constant via a repo-local
  *  opendisplay_epd_map.c (NOT part of this header; bb_epaper never dictates the
  *  wire values). @doc "display controller / panel type (DisplayConfig.panel_ic_type).
@@ -670,8 +686,11 @@ enum PanelIC {
     OD_PANEL_IC_SSD1619_013_BWR          = 1028, /**< @doc "SSD1619 1.3\" 144x200 B/W/R" */
     OD_PANEL_IC_SSD1619_022_LITE_BW      = 1029, /**< @doc "SSD1619 M3 Lite 2.2\" 250x128 B/W" */
     OD_PANEL_IC_SSD1619_022_LITE_BWR     = 1030, /**< @doc "SSD1619 M3 Lite 2.2\" 250x128 B/W/R" */
-    OD_PANEL_IC_ED103TC2_1872X1404       = 3000, /**< @doc "E Ink ED103TC2 + IT8951 (Seeed 10.3\", 1872x1404, 1bpp; Seeed_GFX/OpenDisplay runtime, values 3000+)" */
-    OD_PANEL_IC_ED103TC2_1872X1404_4GRAY = 3001 /**< @doc "same panel as 3000; 4bpp (16-level)" */
+    OD_PANEL_IC_ED103TC2_1872X1404       = 3000, /**< @doc "E Ink ED103TC2 + IT8951 (10.3\", 1872x1404, 1bpp; FastEPD IT8951 path, values 3000+)" */
+    OD_PANEL_IC_ED103TC2_1872X1404_4GRAY = 3001, /**< @doc "same panel as 3000; 4bpp (16-level gray via FastEPD)" */
+    OD_PANEL_IC_INKPLATE5V2_1280X720     = 3002, /**< @doc "Soldered Inkplate 5 V2 (ED050WROW, 1280x720, 1bpp; FastEPD native parallel path)" */
+    OD_PANEL_IC_INKPLATE10_1200X825      = 3003, /**< @doc "Soldered Inkplate 10 (ED097TC2, 1200x825, 1bpp; FastEPD native parallel path)" */
+    OD_PANEL_IC_M5PAPERS3_960X540        = 3004  /**< @doc "M5Stack PaperS3 (ED047TC1-class, 960x540, 16-gray capable; FastEPD native parallel path)" @since 1.5 */
 };
 
 /* DisplayConfig.transmission_modes @bits TransmissionModes (bits 5-6 reserved --
@@ -700,7 +719,7 @@ struct DisplayConfig {
     uint8_t  rotation;               /**< @enum Rotation @doc "physical rotation." */
     uint8_t  reset_pin;              /**< @doc "panel reset GPIO; 0xFF = none." @default 0xFF */
     uint8_t  busy_pin;               /**< @doc "panel busy-status GPIO; 0xFF = none." @default 0xFF */
-    uint8_t  dc_pin;                 /**< @doc "data/command select; doubles as SPI MISO on OpenDisplay-runtime IT8951 / Seeed ED103 panels." */
+    uint8_t  dc_pin;                 /**< @doc "data/command select; doubles as SPI MISO on OpenDisplay-runtime IT8951 / ED103 panels." */
     uint8_t  cs_pin;                 /**< @doc "SPI chip-select; 0xFF = none." @default 0xFF */
     uint8_t  data_pin;               /**< @doc "data-out pin (SPI MOSI / data line)." */
     uint8_t  partial_update_support; /**< @enum PartialUpdateSupport @doc "partial-update capability." */
@@ -731,11 +750,12 @@ enum LedType {
     OD_LED_TYPE_FOUR_SEPARATE = 3  /**< @doc "four separate LEDs" */
 };
 
-/* LedConfig.led_flags @bits LedFlags (bits 4-7 reserved). */
+/* LedConfig.led_flags @bits LedFlags (bits 5-7 reserved). */
 #define OD_LED_FLAG_LED1_INVERT        (1u << 0) /* @doc "invert LED channel 1 polarity" */
 #define OD_LED_FLAG_LED2_INVERT        (1u << 1) /* @doc "invert LED channel 2 polarity" */
 #define OD_LED_FLAG_LED3_INVERT        (1u << 2) /* @doc "invert LED channel 3 polarity" */
 #define OD_LED_FLAG_LED4_INVERT        (1u << 3) /* @doc "invert LED channel 4 polarity" */
+#define OD_LED_FLAG_BUTTON_PRESS       (1u << 4) /* @doc "short flash on physical button press (incl. button-wake synthetic click); default off" */
 
 /** @struct LedConfig  @packet 0x21  @repeatable max=4
  *  @doc "LED channel pins + invert flags. Up to 4 instances. 22 bytes. NOTE: the
@@ -959,8 +979,9 @@ OD_STATIC_ASSERT(sizeof(struct TouchController) == 32, "TouchController wire siz
  * 0x29  buzzer  (config.yaml packet name: passive_buzzer)
  * ----------------------------------------------------------------------- */
 
-/* BuzzerConfig.flags @bits BuzzerFlags (bits 1-7 reserved). */
+/* BuzzerConfig.flags @bits BuzzerFlags (bits 2-7 reserved). */
 #define OD_BUZZER_FLAG_ENABLE_ACTIVE_HIGH (1u << 0) /* @doc "enable pin is active-high when set; otherwise active-low" */
+#define OD_BUZZER_FLAG_BUTTON_PRESS       (1u << 1) /* @doc "short chirp on physical button press (incl. button-wake synthetic click); default off" */
 
 /** @struct BuzzerConfig  @packet 0x29  @repeatable max=4
  *  @doc "Buzzer (passive piezo, PWM-driven). Up to 4 instances. 32 bytes. The tone
@@ -1221,7 +1242,8 @@ OD_STATIC_ASSERT(sizeof(struct AuthProof) == 32, "AuthProof wire size");
 #define OD_MSD_STATUS_BATTERY_VOLTAGE_BIT8 (1u << 0) /* @doc "high bit of the 10-bit battery voltage (units of 10 mV); combine with battery_voltage_low" */
 #define OD_MSD_STATUS_REBOOT_FLAG          (1u << 1) /* @doc "device rebooted since last read" */
 #define OD_MSD_STATUS_CONNECTION_REQUESTED (1u << 2) /* @doc "device is requesting a connection" */
-#define OD_MSD_STATUS_RESERVED_3           (1u << 3) /* @reserved @doc "reserved; must be 0 (placeholder name for a future status flag; sits between the flags and the bits 4-7 counter)" */
+#define OD_MSD_STATUS_ENCRYPTION_ENABLED   (1u << 3) /* @doc "application-layer encryption active (encryption_enabled and non-zero master key)" */
+#define OD_MSD_STATUS_RESERVED_3           (1u << 3) /* @deprecated @doc "legacy name for OD_MSD_STATUS_ENCRYPTION_ENABLED (same bit)" */
 #define OD_MSD_STATUS_MAIN_LOOP_COUNTER_SHIFT 4u     /* @doc "bits 4-7: free-running main-loop nibble counter (liveness)" */
 #define OD_MSD_STATUS_MAIN_LOOP_COUNTER_MASK  0xF0u  /* @doc "mask for the bits 4-7 main-loop counter nibble" */
 

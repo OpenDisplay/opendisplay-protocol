@@ -19,9 +19,9 @@
  *   type mirrors (see docs/shared-types-plan.md); codegen must carry the prose
  *   through as idiomatic doc comments in each target language.
  *
- *   OD_STRUCTS_VERSION  2.1   (MAJOR.MINOR spec marker for THIS file; see
+ *   OD_STRUCTS_VERSION  2.2   (MAJOR.MINOR spec marker for THIS file; see
  *                              VERSIONING POLICY below -- NOT sent on the wire)
- *   LAST CHANGED        2026-08-30
+ *   LAST CHANGED        2026-11-03
  *
  *   The two version schemes carried here are DISTINCT (see §6 Q2 of the plan):
  *     - OD_STRUCTS_VERSION_* : documents this spec file, like protocol.h's
@@ -66,7 +66,48 @@
  * CHANGELOG  (newest first; entries accrue under "Unreleased" and roll into a
  *            new version heading on each bump -- see AGENT INSTRUCTIONS below)
  * --------------------------------------------------------------------------
- *   Unreleased (since 2.1)
+ *   Unreleased (since 2.2)
+ *     - Add each payload-layout change here as it lands. On the next version bump,
+ *       move these under a new "MAJOR.MINOR (YYYY-MM-DD)" heading.
+ *
+ *   2.2  (2026-11-03)  -- config-driven display driver (DRIVER_MIGRATION.md Rev 2)
+ *     - LENGTH-PREFIXED PACKET RANGE: packet-type ids 0x80-0xFF now carry a
+ *       2-byte LE body length after the id (SinglePacketHeaderEx), so a reader
+ *       can SKIP a type it does not know. The legacy range 0x00-0x7F is FROZEN
+ *       (no new fixed-size types, ever; 0x2D findmy_config is the last) and
+ *       writers MUST place all 0x80+ packets AFTER every legacy packet: an old
+ *       reader stops at the first 0x80+ id and keeps everything before it.
+ *     - Drive-data packets 0xAE-0xB1 (display_mode / display_lut /
+ *       display_calibration / display_panel): the panel drive recipe --
+ *       sequences, waveforms, BUSY policy, colour code map, calibration -- as
+ *       config data, replacing the firmware's compiled-in panel table. Variable
+ *       bodies: a fixed HEAD struct + one documented tail each. Packet ids
+ *       0x2E-0x31 were burned by pre-release lab builds carrying fixed-size
+ *       drafts of the same packets and are RESERVED -- never reuse.
+ *     - Drive sequence encoding: OD_SEQ_ESC_* escape set (busy / substitutions /
+ *       image / waveform / delay / SET-PIN / image-slice / CS-select /
+ *       read-scratch / write-from-scratch / waveform-slice), DriveSeqPinRef
+ *       (config-referenced pins so sequences stay board-independent),
+ *       DriveTempPolicy (device-enforced). Escapes 0x80+ reserved as
+ *       length-carrying for skippable future extensions; an executor MUST
+ *       pre-validate and refuse a sequence containing an escape it does not
+ *       implement (OD_ERR_DRIVE_SEQ_UNSUPPORTED, protocol.h 2.3).
+ *     - FindMyConfig packet 0x2D (128 B, singleton) folded back from the
+ *       Firmware_Silabs vendored superset where it shipped first: proximity-
+ *       network provisioning (FMDN / network A), FindMyCurve enum,
+ *       FindMyFlags bits. Parity restore; closes the "py-opendisplay cannot
+ *       read past 0x2D" interop hole by giving the layout one canonical home.
+ *     - ColorScheme value 10 = OD_COLOR_SCHEME_BWRY16: BWRY packing with a
+ *       16-colour multi-pass palette. Packs identically to BWRY(3); the pass
+ *       count comes from the display_mode packet. Value 9 is SKIPPED on
+ *       purpose (epaper-dithering uses 9 for a library-local Grayscale8 that
+ *       is deliberately not a wire value). MUST NOT be written into
+ *       DisplayConfig.color_scheme (0x20) -- 16-colour is a property of a MODE
+ *       (display_mode.color_scheme), the panel's scheme stays BWRY.
+ *     - DisplayConfig: reserved_pin_3..8 renamed aux_pin_1..6 (reserved-carve,
+ *       no size change): auxiliary panel-related pins (BS bus-select, waveform-
+ *       EEPROM CS/MISO, ...) addressed from drive sequences via DriveSeqPinRef.
+ *       0x00 AND 0xFF both mean "not wired" (legacy configs carry 0 here).
  *     - LedFlags bit4: OD_LED_FLAG_BUTTON_PRESS (short LED flash on physical
  *       button press / button-wake synthetic click; default off).
  *     - BuzzerFlags bit1: OD_BUZZER_FLAG_BUTTON_PRESS (short chirp on physical
@@ -75,8 +116,6 @@
  *       encryption active). Firmware sets it when encryption_enabled and master
  *       key are non-zero; dynamic[11] is all 0xFF when no display is configured.
  *       (Folded back from the Firmware side, PR #157 — parity restore.)
- *     - Add each payload-layout change here as it lands. On the next version bump,
- *       move these under a new "MAJOR.MINOR (YYYY-MM-DD)" heading.
  *
  *   2.1  (2026-08-30)
  *     - Add PanelIC value OD_PANEL_IC_M5PAPERS3_960X540 = 3004 (M5Stack PaperS3,
@@ -335,6 +374,31 @@ struct SinglePacketHeader {
 } __attribute__((packed));
 OD_STATIC_ASSERT(sizeof(struct SinglePacketHeader) == 2, "SinglePacketHeader wire size");
 
+/** @packet single-ex  @since 1.6  @doc "Header preceding each config payload whose
+ *  packet-type id is 0x80-0xFF: the LENGTH-PREFIXED range. Unlike the legacy
+ *  range (0x00-0x7F, SinglePacketHeader, payload length implied by the type),
+ *  these carry an explicit 2-byte LE body length, so ANY reader that knows this
+ *  one rule can SKIP a type it does not know and keep parsing. Rules:
+ *  (1) the legacy range 0x00-0x7F is FROZEN -- no new fixed-size packet types,
+ *      ever; 0x2D findmy_config is the last one.
+ *  (2) writers MUST place all 0x80+ packets AFTER every legacy packet. A legacy
+ *      reader stops at the first id it does not know; with 0x80+ sorted last it
+ *      sees exactly the config it understands and loses nothing.
+ *  (3) `length` counts BODY bytes only (not this 4-byte header), so a packet
+ *      occupies 4 + length bytes on the wire. A config cannot exceed the
+ *      transfer ceiling (4080 B on Silabs), so 16 bits is ample.
+ *  (4) packets are readable in place from flash: the length is known before
+ *      the body is touched, so no decode buffer is needed.
+ *  The same mechanism can later carry a long-form extension of a legacy packet
+ *  (e.g. a hypothetical 0xA0 superset of 0x20): old readers use the legacy one,
+ *  new readers prefer the long form." */
+struct SinglePacketHeaderEx {
+    uint8_t  number; /**< @doc "0-based sequential packet index within the outer packet (continues the legacy numbering)." */
+    uint8_t  id;     /**< @enum ConfigPacketType @doc "packet-type id, 0x80-0xFF (length-prefixed range)." */
+    uint16_t length; /**< @endian le @doc "body length in bytes, EXCLUDING this header. A reader skips an unknown type by advancing 4 + length." */
+} __attribute__((packed));
+OD_STATIC_ASSERT(sizeof(struct SinglePacketHeaderEx) == 4, "SinglePacketHeaderEx wire size");
+
 /* ==========================================================================
  * SECTION 2 -- CONFIG PACKET-TYPE IDS
  * ==========================================================================
@@ -362,7 +426,12 @@ enum ConfigPacketType {
     OD_PKT_BUZZER         = 0x29, /**< @doc "buzzer (repeatable, max 4). Canonical name is BUZZER (matches Silabs), resolving the Silabs BUZZER vs NRF54/yaml PASSIVE_BUZZER split; config.yaml's packet name (passive_buzzer) is regenerated to buzzer." */
     OD_PKT_NFC            = 0x2A, /**< @doc "nfc_config (repeatable, max 2)" */
     OD_PKT_FLASH          = 0x2B, /**< @doc "flash_config (repeatable, max 2)" */
-    OD_PKT_DATA_EXTENDED  = 0x2C  /**< @doc "data_extended (singleton)" */
+    OD_PKT_DATA_EXTENDED  = 0x2C, /**< @doc "data_extended (singleton)" */
+    OD_PKT_FINDMY         = 0x2D, /**< @doc "findmy_config (singleton). THE LAST LEGACY-RANGE ID: 0x00-0x7F is frozen as of structs 2.2 -- all new packet types go in the length-prefixed 0x80+ range (SinglePacketHeaderEx). Ids 0x2E-0x31 were burned by pre-release lab builds (fixed-size drafts of the drive packets now at 0xAE-0xB1) and are RESERVED; never reuse them." @since 1.5 */
+    OD_PKT_DISPLAY_MODE   = 0xAE, /**< @doc "display_mode (length-prefixed; repeatable, max 32): one drive mode -- name, colour scheme, pass count, waveform slots, temperature window, drive sequence." @since 1.6 */
+    OD_PKT_DISPLAY_LUT    = 0xAF, /**< @doc "display_lut (length-prefixed; repeatable, max 8): one waveform slot at its real size." @since 1.6 */
+    OD_PKT_DISPLAY_CAL    = 0xB0, /**< @doc "display_calibration (length-prefixed; repeatable, max 32): per-mode palette -- per-pass codes + measured CIELAB. HOST-ONLY: the device skips it." @since 1.6 */
+    OD_PKT_DISPLAY_PANEL  = 0xB1  /**< @doc "display_panel (length-prefixed; repeatable, max 4): per-panel drive properties -- BUSY trust/sense, colour code map, sleep sequence." @since 1.6 */
 };
 
 /* ==========================================================================
@@ -565,6 +634,7 @@ enum ColorScheme {
     OD_COLOR_SCHEME_GRAY16       = 6,   /**< @doc "4bpp 16-level gray" */
     OD_COLOR_SCHEME_SEVEN_COLOR  = 7,   /**< @doc "7-color (Spectra/ACeP 7, config.yaml '7color')" @changed "2.0: value 7 is SEVEN_COLOR; the former COLOR_SCHEME_GRAY8=7 was a mistake (gray8 is not a real scheme) and is removed -- not renumbered." */
     OD_COLOR_SCHEME_BWGBRY_SPLIT = 8,   /**< @doc "Spectra 6 nibbles, left-half plane then right-half plane (dual-CS panels, no device framebuffer)" */
+    OD_COLOR_SCHEME_BWRY16       = 10,  /**< @doc "BWRY packing with a 16-colour multi-pass palette. Packs IDENTICALLY to BWRY(3): 2bpp, one plane; the number of frames comes from the display_mode (0xAE) pass count, not from this value. Exists so a host image pipeline can select the 16-entry palette (display_calibration 0xB0). MUST NOT be written into DisplayConfig.color_scheme -- the PANEL's scheme stays BWRY(3); 16-colour is a property of a MODE (display_mode.color_scheme). Value 9 is SKIPPED on purpose: epaper-dithering uses 9 for a library-local Grayscale8 that is deliberately not a wire value." @since 1.6 */
     OD_COLOR_SCHEME_RGB565       = 100, /**< @doc "RGB565 (non-epaper)" */
     OD_COLOR_SCHEME_RGB888       = 101, /**< @doc "RGB888 (non-epaper)" */
     OD_COLOR_SCHEME_RGB16BPC     = 102  /**< @doc "16 bits per channel (non-epaper)" */
@@ -727,12 +797,12 @@ struct DisplayConfig {
     uint8_t  transmission_modes;     /**< @bits TransmissionModes @doc "supported image/data transmission modes (bitfield)." */
     uint8_t  clk_pin;                /**< @doc "SPI SCLK pin." */
     uint8_t  cs_pin_2;               /**< @doc "second CS for panels split over 2 drivers (dual-controller Spectra); 0xFF = none. Canonical name (firmware called it reserved_pin_2)." @since 1.4 @default 0xFF */
-    uint8_t  reserved_pin_3;         /**< @reserved @doc "spare pin; must be 0." */
-    uint8_t  reserved_pin_4;         /**< @reserved @doc "spare pin; must be 0." */
-    uint8_t  reserved_pin_5;         /**< @reserved @doc "spare pin; must be 0." */
-    uint8_t  reserved_pin_6;         /**< @reserved @doc "spare pin; must be 0." */
-    uint8_t  reserved_pin_7;         /**< @reserved @doc "spare pin; must be 0." */
-    uint8_t  reserved_pin_8;         /**< @reserved @doc "spare pin; must be 0." */
+    uint8_t  aux_pin_1;              /**< @doc "auxiliary panel pin 1 (was reserved_pin_3; reserved-carve). Board wiring for panel-adjacent signals a drive sequence must touch -- BS bus-select, waveform-EEPROM CS, EEPROM MISO, ... -- addressed from sequences via DriveSeqPinRef, never by GPIO number, so panels.yaml stays board-independent. 0x00 AND 0xFF both mean 'not wired' (legacy configs carry 0 here)." @since 1.6 */
+    uint8_t  aux_pin_2;              /**< @doc "auxiliary panel pin 2 (was reserved_pin_4); see aux_pin_1." @since 1.6 */
+    uint8_t  aux_pin_3;              /**< @doc "auxiliary panel pin 3 (was reserved_pin_5); see aux_pin_1." @since 1.6 */
+    uint8_t  aux_pin_4;              /**< @doc "auxiliary panel pin 4 (was reserved_pin_6); see aux_pin_1." @since 1.6 */
+    uint8_t  aux_pin_5;              /**< @doc "auxiliary panel pin 5 (was reserved_pin_7); see aux_pin_1." @since 1.6 */
+    uint8_t  aux_pin_6;              /**< @doc "auxiliary panel pin 6 (was reserved_pin_8); see aux_pin_1." @since 1.6 */
     uint16_t full_update_mC;         /**< @endian le @unit mC @doc "energy consumed by a full refresh; 0 = unknown." */
     uint8_t  reserved[13];           /**< @reserved @doc "future use; must be 0." */
 } __attribute__((packed));
@@ -1094,6 +1164,216 @@ struct DataExtended {
     uint8_t custom_string_3[32];   /**< @doc "user-defined string 3." */
 } __attribute__((packed));
 OD_STATIC_ASSERT(sizeof(struct DataExtended) == 288, "DataExtended wire size");
+
+/* -----------------------------------------------------------------------
+ * 0x2D  findmy_config  (the LAST legacy-range packet; 0x00-0x7F is frozen)
+ * ----------------------------------------------------------------------- */
+
+/** @enum FindMyCurve  @width 1  @doc "FMDN EID curve selector (FindMyConfig.fmdn_curve)." */
+enum FindMyCurve {
+    OD_FINDMY_CURVE_SECP160R1 = 0, /**< @doc "20-byte static EID (network G / legacy AD). Uses advertisement_key." */
+    OD_FINDMY_CURVE_SECP256R1 = 1  /**< @doc "32-byte rotating EID on SECP256R1 (extended AD)." */
+};
+
+/* FindMyConfig.flags @bits FindMyFlags (bits 2-7 reserved). */
+#define OD_FINDMY_FLAG_FMDN_ENABLE   (1u << 0) /* @doc "enable network G (FMDN) advertising." */
+#define OD_FINDMY_FLAG_NET_A_ENABLE  (1u << 1) /* @doc "enable network A (legacy offline-finding) advertising." */
+
+/** @struct FindMyConfig  @packet 0x2D  @since 1.5
+ *  @doc "Proximity-network provisioning blob. Singleton. 128 bytes. For network G use
+ *  fmdn_curve=secp160r1 with advertisement_key=generate_eid(eik,0) (static beacon_counter=0).
+ *  SECP256R1 rotates from eik+time_base on-device.
+ *  For network A set net_a_enable and net_a_adv_key to the 28-byte P-224 advertisement public key X.
+ *  net_a_time_base stays 0 (static mode, no on-device rotation). Reserved bytes must be zero.
+ *  Folded back from the Firmware_Silabs vendored superset (parity restore): this packet
+ *  shipped before it had a canonical home, which is exactly the interop hole the frozen
+ *  legacy range + 0x80+ length rule now prevent -- a reader that did not know 0x2D could
+ *  not skip it and lost everything behind it." */
+struct FindMyConfig {
+    uint8_t flags;                   /**< @bits FindMyFlags @doc "enable flags; bits 2-7 reserved." */
+    uint8_t fmdn_k;                  /**< @doc "FMDN rotation-period exponent K (typically 10)." */
+    uint8_t fmdn_curve;              /**< @enum FindMyCurve @doc "FMDN EID curve selector." */
+    uint8_t reserved0[5];            /**< @reserved @doc "must be 0; pads the control header to 8 bytes." */
+    uint8_t eik[32];                 /**< @doc "Network G ephemeral identity key (32 bytes)." */
+    uint8_t net_a_adv_key[28];       /**< @doc "Network A 28-byte advertisement public key X (not the private key)." */
+    uint32_t time_base_unix;         /**< @endian le @unit s @doc "Unix epoch for SECP256R1 rotation; unused for static SECP160 (write 0)." */
+    uint32_t net_a_time_base;        /**< @endian le @unit s @doc "unused in static network A mode; write 0." */
+    uint8_t advertisement_key[20];   /**< @doc "Static 20-byte SECP160 EID for network G (generate_eid(eik,0)); zero when unused." */
+    uint8_t reserved1[32];           /**< @reserved @doc "must be 0; reserved for future extensions." */
+} __attribute__((packed));
+OD_STATIC_ASSERT(sizeof(struct FindMyConfig) == 128, "FindMyConfig wire size");
+
+/* ==========================================================================
+ * 0xAE-0xB1  PANEL DRIVE DATA  (length-prefixed range, SinglePacketHeaderEx)
+ * ==========================================================================
+ * The panel drive recipe as CONFIG data, replacing the firmware's compiled-in
+ * panel table (vendored bb_epaper): every command byte, every waveform, the
+ * BUSY policy and the colour code map arrive in these packets. The firmware
+ * knows how to EXECUTE a sequence; the config knows WHAT the sequence is. A
+ * device with none of these packets cannot drive its panel at all.
+ * Design review: Firmware_Silabs docs/DRIVER_MIGRATION.md (Rev 2).
+ *
+ * These are VARIABLE-BODY packets: each is a fixed HEAD struct (below) followed
+ * by ONE documented tail; the total body length travels in
+ * SinglePacketHeaderEx.length. Packet ids 0x2E-0x31 were burned by pre-release
+ * lab builds carrying fixed-size drafts of these packets; RESERVED, never reuse.
+ *
+ * DRIVE SEQUENCE ENCODING -- the contract everything else hangs off.
+ * A mode's whole recipe for one pass is a byte string of steps:
+ *     [len][cmd][data...]        len counts cmd+data, len >= 1
+ * A step always has a command byte, so len = 0x00 is impossible as a step and
+ * is free as the ESCAPE prefix: [0x00][esc][args...] with esc = DriveSeqEscape
+ * (argument shapes documented per value below). One sequence is the whole
+ * recipe for a pass -- registers, waveform upload, image, power-on, refresh --
+ * so waveform placement is simply the POSITION of the LUT escape in the
+ * sequence, and the executor needs no per-panel opinions.
+ * Escapes 0x80-0xFF are RESERVED and length-carrying ([0x00][esc][len][args]),
+ * so a future OPTIONAL escape can be skipped by executors that know this rule.
+ * An executor MUST pre-validate a sequence and refuse it wholesale -- NACK
+ * OD_ERR_DRIVE_SEQ_UNSUPPORTED, BEFORE any panel I/O -- if it contains an
+ * escape it does not know or has not implemented. No partial execution.
+ * ========================================================================== */
+
+/** @enum DriveSeqEscape  @width 1
+ *  @doc "Escape codes inside a drive sequence ([0x00][esc][args...], see the
+ *  section banner). Argument byte counts are fixed per value (0x00-0x7F);
+ *  0x80+ reserved escapes carry an explicit length byte instead." */
+enum DriveSeqEscape {
+    OD_SEQ_ESC_END           = 0x00, /**< @doc "end of sequence (no args)." */
+    OD_SEQ_ESC_BUSY          = 0x01, /**< @doc "wait for BUSY to clear per display_panel busy policy (no args)." */
+    OD_SEQ_ESC_SUBST         = 0x02, /**< @doc "args [n][off,val]*n: next step is sent with n (offset,value) byte substitutions applied -- waveform-header patching." */
+    OD_SEQ_ESC_IMAGE         = 0x03, /**< @doc "stream the WHOLE image frame here (no args; executor pauses for 0x71/0x81 data). Equivalent to IMAGE_SLICE part 0 of 1." */
+    OD_SEQ_ESC_LUT           = 0x04, /**< @doc "stream the WHOLE waveform slot of the current pass here (no args). Slot selected by display_mode.lut_slot[pass]." */
+    OD_SEQ_ESC_DELAY         = 0x05, /**< @doc "args [lo][hi]: wait N ms (u16 LE). NOT a BUSY substitute -- exists for panels whose BUSY is unusable and for fixed settles." */
+    OD_SEQ_ESC_SET_PIN       = 0x06, /**< @doc "args [pin_ref][level]: set a config-referenced pin (DriveSeqPinRef; NEVER a raw GPIO number, so sequences stay board-independent). level 0/1 drive low/high; 2 = release to input/Hi-Z (bidirectional data line during 3-wire read-back). Covers BS bus-select (high for BWRY glass, toggled around UC8159 temperature read-back) and the waveform-EEPROM CS." @since 1.6 */
+    OD_SEQ_ESC_IMAGE_SLICE   = 0x07, /**< @doc "args [part][of]: stream slice `part` (0-based) of `of` equal slices of the frame. Slices divide the UNCOMPRESSED frame, so they compose with a compressed transfer. For split panels: dual-CS Spectra 6 (CS_SELECT then slice 1 of 2) and single-CS dual-controller glass addressed via cmd|0x80 (0x24+slice 0 of 2, 0xA4+slice 1 of 2)." @since 1.6 */
+    OD_SEQ_ESC_CS_SELECT     = 0x08, /**< @doc "args [cs_sel]: route following steps to chip-select n (0 = cs_pin, 1 = cs_pin_2). Sticky until changed; every sequence starts at 0." @since 1.6 */
+    OD_SEQ_ESC_READ_SCRATCH  = 0x09, /**< @doc "args [pin_ref][len]: clock `len` bytes (<= 16) into the scratch buffer, sampling `pin_ref` (DriveSeqPinRef) as the data-in line -- explicit because the read source varies (dc_pin doubles as MISO on some boards; a waveform EEPROM has its own MISO on an aux pin). Scratch is 16 bytes, zeroed at sequence start." @since 1.6 */
+    OD_SEQ_ESC_WRITE_SCRATCH = 0x0A, /**< @doc "args [cmd][off][len]: send command byte `cmd` followed by scratch[off..off+len) as data. With READ_SCRATCH this expresses e.g. the UC8159 panel-EEPROM flow (SET_PIN eeprom-CS, READ_SCRATCH PLL/VCOM, WRITE_SCRATCH into registers)." @since 1.6 */
+    OD_SEQ_ESC_LUT_SLICE     = 0x0B  /**< @doc "args [off:2 LE][len:2 LE]: stream bytes [off, off+len) of the current pass's waveform slot. For controllers whose waveform spans several registers (UC81xx 0x20-0x24): the slot stores the concatenation and the sequence sends one slice per register, so ONE slot per pass still suffices." @since 1.6 */
+};
+
+/** @enum DriveSeqPinRef  @width 1
+ *  @doc "Pin references used by SET_PIN / READ_SCRATCH escape args. Values
+ *  index pins the config already names (DisplayConfig 0x20), NEVER raw GPIO
+ *  numbers -- a panels.yaml sequence must not depend on board wiring." */
+enum DriveSeqPinRef {
+    OD_SEQ_PINREF_AUX_1 = 0x00, /**< @doc "DisplayConfig.aux_pin_1" */
+    OD_SEQ_PINREF_AUX_2 = 0x01, /**< @doc "DisplayConfig.aux_pin_2" */
+    OD_SEQ_PINREF_AUX_3 = 0x02, /**< @doc "DisplayConfig.aux_pin_3" */
+    OD_SEQ_PINREF_AUX_4 = 0x03, /**< @doc "DisplayConfig.aux_pin_4" */
+    OD_SEQ_PINREF_AUX_5 = 0x04, /**< @doc "DisplayConfig.aux_pin_5" */
+    OD_SEQ_PINREF_AUX_6 = 0x05, /**< @doc "DisplayConfig.aux_pin_6" */
+    OD_SEQ_PINREF_RESET = 0x10, /**< @doc "DisplayConfig.reset_pin" */
+    OD_SEQ_PINREF_DC    = 0x11, /**< @doc "DisplayConfig.dc_pin (doubles as MISO on some boards)" */
+    OD_SEQ_PINREF_CS    = 0x12, /**< @doc "DisplayConfig.cs_pin" */
+    OD_SEQ_PINREF_CS_2  = 0x13, /**< @doc "DisplayConfig.cs_pin_2" */
+    OD_SEQ_PINREF_DATA  = 0x14, /**< @doc "DisplayConfig.data_pin (MOSI)" */
+    OD_SEQ_PINREF_CLK   = 0x15  /**< @doc "DisplayConfig.clk_pin (SCLK)" */
+};
+
+/** @enum DriveTempPolicy  @width 1
+ *  @doc "display_mode.temp_policy: what the DEVICE does when its temperature
+ *  estimate falls outside [temp_min_c, temp_max_c] at DRIVE_WRITE_START. The
+ *  device enforces -- it is the thing with a sensor; the 0x0085 ACK reports the
+ *  mode actually used plus temp_c (opendisplay_protocol.h 2.3)." */
+enum DriveTempPolicy {
+    OD_DRIVE_TEMP_ADVISORY   = 0, /**< @doc "run the requested mode regardless (window is documentation)." */
+    OD_DRIVE_TEMP_SUBSTITUTE = 1, /**< @doc "substitute the declared mode whose window covers the current temperature; ties break to the LOWEST mode_index. The ACK's mode byte reports the substitution; hosts MUST read it back." */
+    OD_DRIVE_TEMP_REJECT     = 2  /**< @doc "NACK with OD_ERR_DRIVE_TEMP_RANGE; nothing is driven." */
+};
+
+/* DisplayPanelHead.panel_flags @bits DisplayPanelFlags (bits 2-7 reserved). */
+#define OD_PANEL_FLAG_BUSY_USABLE   (1u << 0) /* @doc "the BUSY line can be polled; else use busy_fixed_delay_ms blind waits." */
+#define OD_PANEL_FLAG_LUT_SUPPORTED (1u << 1) /* @doc "panel honours a custom waveform (display_lut slots are meaningful)." */
+
+/* DisplayCalibrationHead.cal_flags @bits DriveCalFlags (bits 1-7 reserved). */
+#define OD_DRIVE_CAL_FLAG_MEASURED  (1u << 0) /* @doc "lab[] values were photometrically measured on THIS unit; 0 = borrowed/nominal placeholder." */
+
+/** @struct DisplayModeHead  @packet 0xAE  @repeatable max=32  @since 1.6
+ *  @doc "HEAD of a display_mode packet: one drive mode of one display. Body =
+ *  this 37-byte head + seq[seq_len] (the encoded drive sequence; see the
+ *  section banner for the step/escape grammar). Body length = 37 + seq_len,
+ *  carried in SinglePacketHeaderEx.length." */
+struct DisplayModeHead {
+    uint8_t  instance_number; /**< @doc "display instance this mode belongs to (DisplayConfig.instance_number)." */
+    uint8_t  mode_index;      /**< @doc "mode id named by CMD_DRIVE_WRITE_START's mode byte; unique per display." */
+    uint8_t  mode_name[12];   /**< @doc "human-readable mode name, NUL-padded ASCII (e.g. 'full', 'fast', '16colour')." */
+    uint8_t  color_scheme;    /**< @enum ColorScheme @doc "what this mode RENDERS (e.g. BWRY16 for a multi-pass 16-colour mode, GRAY16 for a grey mode on a BWR panel); 0xFF = inherit the panel's DisplayConfig.color_scheme. This is the one legitimate home for mode-level schemes like BWRY16 that must never enter 0x20." */
+    uint8_t  passes;          /**< @min 1 @max 8 @doc "how many frames one transfer streams; the device re-runs the sequence per pass." */
+    uint8_t  temp_min_c;      /**< @doc "lower temperature bound, SIGNED int8 two's complement, degrees C." */
+    uint8_t  temp_max_c;      /**< @doc "upper temperature bound, SIGNED int8 two's complement, degrees C." */
+    uint8_t  temp_policy;     /**< @enum DriveTempPolicy @doc "device-enforced out-of-window behaviour." */
+    uint8_t  lut_slot[8];     /**< @doc "waveform slot per pass (display_lut.lut_slot); 0xFF = no custom waveform for that pass. Entries past `passes` are 0xFF." */
+    uint8_t  vsn1[8];         /**< @doc "per-pass waveform byte-3 patch value; 0 = none. Entries past `passes` are 0." */
+    uint16_t seq_len;         /**< @endian le @doc "byte length of the seq[] tail that follows this head." */
+} __attribute__((packed));
+OD_STATIC_ASSERT(sizeof(struct DisplayModeHead) == 37, "DisplayModeHead wire size");
+
+/** @struct DisplayLutHead  @packet 0xAF  @repeatable max=8  @since 1.6
+ *  @doc "HEAD of a display_lut packet: one waveform slot AT ITS REAL SIZE
+ *  (an SSD16xx waveform is ~70-110 B; UC8151-class ~535 B -- no fixed-body
+ *  padding). Body = this 4-byte head + data[SinglePacketHeaderEx.length - 4].
+ *  A slot failing crc16 is treated as ABSENT, not as garbage: a corrupt or
+ *  half-written waveform degrades to 'no custom waveform' rather than driving
+ *  the panel with noise. Stream the waveform at the length the panel's
+ *  register holds -- NEVER trim trailing idle bytes (fewer bytes than the
+ *  register leaves stale data in the tail)." */
+struct DisplayLutHead {
+    uint8_t  instance_number; /**< @doc "display instance this slot belongs to." */
+    uint8_t  lut_slot;        /**< @doc "slot id referenced by display_mode.lut_slot[]." */
+    uint16_t crc16;           /**< @endian le @doc "CRC16-CCITT (poly OD_CONFIG_CRC_POLY, init OD_CONFIG_CRC_INIT) over the data[] tail." */
+} __attribute__((packed));
+OD_STATIC_ASSERT(sizeof(struct DisplayLutHead) == 4, "DisplayLutHead wire size");
+
+/** @struct DisplayCalibrationHead  @packet 0xB0  @repeatable max=32  @since 1.6
+ *  @doc "HEAD of a display_calibration packet: the renderable palette of one
+ *  multi-pass mode. Body = this 4-byte head + entry_count repetitions of
+ *  DisplayCalibrationEntry (8 B each). HOST-ONLY: the device skips this packet;
+ *  it exists so a host image pipeline can quantise against real measured
+ *  colour. Encoding and measurement live in ONE packet deliberately: a
+ *  measurement whose codes are unknown cannot be reproduced, and codes with no
+ *  measurement cannot be chosen between." */
+struct DisplayCalibrationHead {
+    uint8_t  instance_number; /**< @doc "display instance." */
+    uint8_t  mode_index;      /**< @doc "display_mode this palette belongs to." */
+    uint8_t  cal_flags;       /**< @bits DriveCalFlags @doc "bit0 = measured on this unit." */
+    uint8_t  entry_count;     /**< @min 1 @max 32 @doc "number of DisplayCalibrationEntry records following (e.g. 17 for 16 greys + red)." */
+} __attribute__((packed));
+OD_STATIC_ASSERT(sizeof(struct DisplayCalibrationHead) == 4, "DisplayCalibrationHead wire size");
+
+/** @struct DisplayCalibrationEntry  @since 1.6
+ *  @doc "One palette entry: the per-pass panel codes that produce a colour,
+ *  plus its measured CIELAB. codes are PANEL codes, already past code_map --
+ *  do NOT apply display_panel.code_map to them (doing so swaps yellow and red
+ *  on BWRY glass)." */
+struct DisplayCalibrationEntry {
+    uint16_t codes;           /**< @endian le @doc "packed 2-bit panel codes, pass p in bits [2p+1:2p] (LSB-first); 16 bits cover the 8-pass maximum." */
+    uint16_t lab_l;           /**< @endian le @doc "CIELAB L* x100, SIGNED int16 two's complement." */
+    uint16_t lab_a;           /**< @endian le @doc "CIELAB a* x100, SIGNED int16 two's complement." */
+    uint16_t lab_b;           /**< @endian le @doc "CIELAB b* x100, SIGNED int16 two's complement." */
+} __attribute__((packed));
+OD_STATIC_ASSERT(sizeof(struct DisplayCalibrationEntry) == 8, "DisplayCalibrationEntry wire size");
+
+/** @struct DisplayPanelHead  @packet 0xB1  @repeatable max=4  @since 1.6
+ *  @doc "HEAD of a display_panel packet: per-panel drive properties that were
+ *  NEVER on the wire before -- 0x20 carries busy_pin but says nothing about
+ *  whether that pin can be BELIEVED (the 4.2 inch GDEM042F52 asserts busy from
+ *  power-up and never releases after refresh; polling it stalls forever).
+ *  Without this packet a config-driven driver is unimplementable. Body = this
+ *  13-byte head + sleep_seq[sleep_seq_len] (same step/escape encoding as
+ *  display_mode.seq)." */
+struct DisplayPanelHead {
+    uint8_t  instance_number;     /**< @doc "display instance this describes." */
+    uint8_t  panel_flags;         /**< @bits DisplayPanelFlags @doc "BUSY trust + waveform support." */
+    uint8_t  busy_idle_level;     /**< @min 0 @max 1 @doc "pin level meaning not-busy (UC81xx idles high, SSD16xx low)." */
+    uint16_t busy_timeout_ms;     /**< @endian le @unit ms @doc "poll ceiling when BUSY is usable." */
+    uint16_t busy_fixed_delay_ms; /**< @endian le @unit ms @doc "blind wait when it is not (OD_PANEL_FLAG_BUSY_USABLE clear)." */
+    uint8_t  code_map[4];         /**< @doc "logical colour index -> panel 2-bit code, for the 4-colour path. NEVER apply to display_calibration codes (already panel codes)." */
+    uint8_t  mode_count;          /**< @doc "how many display_mode packets belong to this display." */
+    uint8_t  sleep_seq_len;       /**< @doc "byte length of the sleep_seq[] tail; 0 = no sleep sequence." */
+} __attribute__((packed));
+OD_STATIC_ASSERT(sizeof(struct DisplayPanelHead) == 13, "DisplayPanelHead wire size");
 
 /* ==========================================================================
  * SECTION 5 -- MESSAGE PAYLOAD STRUCTS  (fixed-size opcode payloads)

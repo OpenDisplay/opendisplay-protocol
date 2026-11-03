@@ -9,8 +9,8 @@
  *   image PIPE. A new engineer or an AI agent should be able to implement a
  *   fully-correct client from THIS FILE ALONE, without reading firmware.
  *
- *   OD_PROTOCOL_VERSION 2.2   (MAJOR.MINOR; see VERSIONING POLICY below)
- *   LAST CHANGED        2026-07-25
+ *   OD_PROTOCOL_VERSION 2.3   (MAJOR.MINOR; see VERSIONING POLICY below)
+ *   LAST CHANGED        2026-11-03
  *
  * --------------------------------------------------------------------------
  * VERSIONING POLICY
@@ -52,7 +52,37 @@
  * CHANGELOG  (newest first; entries accrue under "Unreleased" and roll into a
  *            new version heading on each bump -- see AGENT INSTRUCTIONS below)
  * --------------------------------------------------------------------------
- *   Unreleased (since 2.2)
+ *   Unreleased (since 2.3)
+ *     - Add each further wire-spec change here as it lands. On the next version
+ *       bump, move these under a new "MAJOR.MINOR (YYYY-MM-DD)" heading.
+ *
+ *   2.3  (2026-11-03)  -- config-driven display driver (DRIVER_MIGRATION.md Rev 2)
+ *     - CMD_DRIVE_WRITE_START (0x0085): full-frame write naming a config-declared
+ *       drive mode at START; multi-pass is one transfer (one zlib stream across
+ *       all frames). ACK is [mode][passes][temp_c] where `mode` is the mode
+ *       ACTUALLY RUN (the device enforces the mode's temp_policy and may
+ *       substitute) and temp_c is the device's best temperature estimate
+ *       (int8, 0x7F = unknown). New opcode-scoped error namespace
+ *       OD_ERR_DRIVE_* (SECTION 4e), including 0x06 TEMP_RANGE (policy=reject)
+ *       and 0x07 SEQ_UNSUPPORTED (sequence contains an escape this target does
+ *       not implement; refused before touching the panel). Silabs-first.
+ *     - CMD_SPI_RAW (0x0084): debug/bring-up escape hatch driving the panel SPI
+ *       bus directly (session-oriented OPEN/CMD/DATA/DATA_NOACK/BUSY/RESET/
+ *       CLOSE sub-opcodes, OD_ERR_SPI_RAW_* namespace, SECTION 4f). Folded back
+ *       from the Firmware_Silabs vendored copy where it shipped first -- parity
+ *       restore, Silabs-only.
+ *     - CMD_READ_IDENT (0x0046): plaintext device-identification read so a host
+ *       can pick the right panel database entry for a device it has never seen
+ *       (per-display panel_ic_type/geometry/color_scheme). Plaintext like 0x43/
+ *       0x44: identity is needed before a host can know WHAT it is pairing
+ *       with, and it carries no secrets. (The driver-migration review proposed
+ *       "0x0043"; that opcode is CMD_FIRMWARE_VERSION, so 0x0046 -- the next
+ *       free slot in the plaintext info family -- is assigned instead.)
+ *     - RESP_ echo bytes for the three opcodes (0x46/0x84/0x85).
+ *     - Companion payload layouts (drive-mode/lut/calibration/panel config
+ *       packets 0xAE-0xB1, the 0x80+ length-prefixed packet format, drive
+ *       sequence escapes) live in opendisplay_structs.h 2.2.
+ *     (entries below accrued under "Unreleased (since 2.2)" and roll into 2.3:)
  *     - LAN framing: cap the WIRE frame ([len:2 LE] prefix + payload) at a new
  *       constant OD_LAN_MAX_FRAME (4096); OD_LAN_MAX_PAYLOAD is now DERIVED as
  *       OD_LAN_MAX_FRAME - 2 = 4094 (was a standalone 4096, which made the max
@@ -76,8 +106,6 @@
  *       bytes (shaLen = ASCII SHA byte count 0..40; missing patch => 0), matching
  *       what shipped firmware already emits. Backported from Firmware's vendored
  *       copy. No wire change, no version bump.
- *     - Add each further wire-spec change here as it lands. On the next version
- *       bump, move these under a new "MAJOR.MINOR (YYYY-MM-DD)" heading.
  *
  *   2.2  (2026-07-22)
  *     - MINOR: new SECTION 9 -- NETWORK TRANSPORT (LAN). Documents the WiFi/LAN
@@ -263,8 +291,8 @@
  * when to bump which number. This marker describes the spec and is NOT sent on
  * the wire (the negotiated 0x0080 PIPE_VERSION is a separate field). */
 #define OD_PROTOCOL_VERSION_MAJOR      2u
-#define OD_PROTOCOL_VERSION_MINOR      2u
-#define OD_PROTOCOL_VERSION_STR        "2.2"
+#define OD_PROTOCOL_VERSION_MINOR      3u
+#define OD_PROTOCOL_VERSION_STR        "2.3"
 
 /* ==========================================================================
  * SECTION 1 -- COMMAND OPCODES (16-bit, big-endian on the wire)
@@ -373,6 +401,43 @@
  * @targets:  Firmware | NRF54 | Silabs      (NOT NRF52811)
  * -------------------------------------------------------------------------- */
 #define CMD_CONFIG_CLEAR               0x0045u
+
+/* --------------------------------------------------------------------------
+ * @opcode: 0x0046   @name: CMD_READ_IDENT   @dir: host->device
+ * @request:  [0x00][0x46]  (no payload)
+ * @response: [0x00][0x46][proto_minor:1][fw_target:1][display_count:1]
+ *            then display_count repetitions of the 7-byte per-display record:
+ *              [panel_ic_type:2 LE][pixel_width:2 LE][pixel_height:2 LE][color_scheme:1]
+ *            proto_minor = OD_PROTOCOL_VERSION_MINOR of the running firmware;
+ *            fw_target   = OD_IDENT_TARGET_* (which firmware family answers);
+ *            the per-display fields carry the SAME values/enums as the
+ *            DisplayConfig (0x20) fields of the same names
+ *            (opendisplay_structs.h). display_count = 0 is valid: the device
+ *            is reachable but has no display configured (e.g. straight after
+ *            an OTA onto the config-driven driver, before drive data is
+ *            written).
+ * @errors:   [0xFF][0x46] only on internal read failure; an EMPTY config is
+ *            NOT an error (see display_count = 0 above).
+ * @state:    PLAINTEXT, like 0x43/0x50 (and 0x44 on Silabs): identity is
+ *            needed precisely when the host does not yet know what it is
+ *            talking to, and it carries no secrets. Never auth-gated.
+ * @purpose:  lets a host pick the right panel-database (panels.yaml) entry for
+ *            a device it has never seen. Sources differ by target: Silabs
+ *            answers from its stored config (0x20); targets with factory
+ *            provisioning (e.g. Solum tags, UICR CUSTOMER data on nRF) answer
+ *            from factory data, which is the actual point -- those devices
+ *            know their panel before any config is ever written.
+ * @limits:   max 4 displays -> response <= 5 + 4*7 = 33 bytes; fits one frame.
+ * @targets:  Silabs      (Firmware/NRF54/NRF52811: pending adoption)
+ * @since:    2.3 (DRIVER_MIGRATION.md Rev 2, review point R8)
+ * -------------------------------------------------------------------------- */
+#define CMD_READ_IDENT                 0x0046u
+
+/* CMD_READ_IDENT fw_target values (response byte 3). */
+#define OD_IDENT_TARGET_FIRMWARE       0x01u   /* nRF52840+ESP32 "Firmware" */
+#define OD_IDENT_TARGET_NRF54          0x02u
+#define OD_IDENT_TARGET_SILABS         0x03u
+#define OD_IDENT_TARGET_NRF52811       0x04u
 
 /* --------------------------------------------------------------------------
  * @opcode: 0x0050   @name: CMD_AUTHENTICATE   @dir: host->device
@@ -690,6 +755,151 @@
  * -------------------------------------------------------------------------- */
 #define CMD_NFC_ENDPOINT               0x0083u
 
+/* --------------------------------------------------------------------------
+ * @opcode: 0x0084   @name: CMD_SPI_RAW   @dir: host->device
+ * @purpose:  Debug/bring-up escape hatch: drive the panel's SPI bus directly
+ *            so register sequences, init sequences and custom waveforms can be
+ *            tried without a firmware rebuild.
+ * @request:  [0x00][0x84][sub:1][args...]
+ *              sub = 0x00 OPEN   [flags:1]
+ *                      flags bit0 = after powering the rail and configuring
+ *                                   SPI/GPIO, also run the driver's full panel
+ *                                   init. Default (bit0 clear) brings up POWER
+ *                                   AND PINS ONLY and sends nothing, so virgin
+ *                                   register state is observable and the caller
+ *                                   owns the whole sequence.
+ *                    0x01 CMD    [cmd:1][data...]
+ *                      cmd byte is clocked with D/C low, any trailing bytes
+ *                      with D/C high (the usual command-then-parameters shape).
+ *                    0x02 DATA   [data...]
+ *                      all bytes with D/C high. Use to continue a payload that
+ *                      does not fit in one frame (see @limits).
+ *                    0x06 DATA_NOACK [data...]
+ *                      identical to DATA but emits NO response, so the host
+ *                      can stream with write-without-response. Intended for
+ *                      bulk pixel/LUT payloads where a round trip per frame
+ *                      dominates. No error can be reported; follow the burst
+ *                      with an ACKed sub-opcode to resynchronise.
+ *                    0x03 BUSY   [timeout_ms:2 LE]
+ *                    0x04 RESET  [hold_ms:1]
+ *                      drives RST low for hold_ms (clamped 1..50), then high.
+ *                    0x05 CLOSE
+ *                      sleep + power the rail down. Idempotent.
+ * @response: [0x00][0x84][sub:1][...]
+ *              OPEN/CMD/DATA/RESET/CLOSE: no extra data.
+ *              BUSY: [elapsed_ms:2 LE][busy:1]  busy = 1 if STILL busy at
+ *                    timeout (i.e. it timed out), 0 if BUSY released in time.
+ * @errors:   [0xFF][0x84][err:1][sub:1], err = OD_ERR_SPI_RAW_* (SECTION 4f).
+ * @state:    OPEN starts a session that PERSISTS across commands -- this is
+ *            the whole point. A raw command that re-initialises between calls
+ *            is useless for register debugging, because the reset silently
+ *            discards whatever the previous call staged.
+ *            OPEN first aborts any in-flight direct-write transfer (they share
+ *            one panel object). A BLE disconnect force-closes the session, so
+ *            a dropped link cannot leave the rail powered or the panel driving.
+ * @limits:   one frame carries <= 244 bytes total, so a single CMD moves ~240
+ *            data bytes; chain 0x02 DATA for more. BUSY timeout <= 90000 ms.
+ * @security: no special case -- it sits in the normal dispatch switch and so
+ *            inherits the standard gate: when encryption is enabled an
+ *            unauthenticated caller gets RESP_AUTH_REQUIRED and never reaches
+ *            the handler.
+ * @caution:  this bypasses every driver-level safety check. A malformed
+ *            sequence can leave the panel powered, mid-refresh, or driven with
+ *            a DC-imbalanced waveform, which degrades e-paper over time.
+ *            Prefer an explicit CLOSE rather than relying on disconnect.
+ * @targets:  Silabs      (NOT Firmware, NOT NRF54, NOT NRF52811)
+ * @since:    2.3 (shipped first in the Firmware_Silabs vendored copy; folded
+ *            back here for parity)
+ * -------------------------------------------------------------------------- */
+#define CMD_SPI_RAW                    0x0084u
+
+/* CMD_SPI_RAW sub-opcodes (request byte 2). */
+#define SPI_RAW_SUB_OPEN               0x00u
+#define SPI_RAW_SUB_CMD                0x01u
+#define SPI_RAW_SUB_DATA               0x02u
+#define SPI_RAW_SUB_BUSY               0x03u
+#define SPI_RAW_SUB_RESET              0x04u
+#define SPI_RAW_SUB_CLOSE              0x05u
+/* 0x06 DATA_NOACK: same as DATA but sends NO response, so the host can stream
+ * with BLE write-without-response instead of paying a round trip per frame.
+ * This is how CMD_DIRECT_WRITE_DATA (0x71) already moves bulk pixels; the
+ * ACK-per-frame cost dominated an early 16-colour render (54 s for 327 frames,
+ * i.e. ~165 ms each, almost all of it latency rather than transfer).
+ * Errors cannot be reported, by construction. Follow a burst with any ACKed
+ * sub-opcode (e.g. BUSY) to resynchronise and confirm the session is alive. */
+#define SPI_RAW_SUB_DATA_NOACK         0x06u
+
+/* CMD_SPI_RAW OPEN flags (request byte 3). */
+#define SPI_RAW_OPEN_FLAG_PANEL_INIT   0x01u   /* also run the full panel init */
+
+/* --------------------------------------------------------------------------
+ * @opcode: 0x0085   @name: CMD_DRIVE_WRITE_START   @dir: host->device
+ * @request:  [0x00][0x85][mode:1][refresh:1][flags:1][rsv:2]
+ *              [uncompressed_size:4 LE]   present IFF flags bit0 COMPRESSED
+ *              [first data bytes...]
+ * @response: [0x00][0x85][mode:1][passes:1][temp_c:1] on accept.
+ *              `mode`   = the mode ACTUALLY SELECTED. The device enforces the
+ *                         mode's temp_policy (display_mode packet,
+ *                         opendisplay_structs.h): under policy SUBSTITUTE it
+ *                         may answer with a different, temperature-legal mode
+ *                         than the one requested. A host MUST read this back
+ *                         rather than assume its request was honoured.
+ *              `passes` = how many frames the device now expects, read from
+ *                         the CONFIG rather than assumed, so a host need not
+ *                         duplicate the mode table.
+ *              `temp_c` = device's best panel-temperature estimate, int8
+ *                         two's complement in degrees C; 0x7F = unknown.
+ * @errors:   [0xFF][0x85][err:1][mode:1], err = OD_ERR_DRIVE_* (SECTION 4e).
+ *
+ * @doc: A full-frame write that names the config-declared DRIVE MODE up front.
+ *
+ *       WHY NOT JUST REUSE 0x0070. The mode has to be known at START: this
+ *       driver uploads the waveform as part of the init sequence, BEFORE the
+ *       frame. 0x0072 END already carries a `refresh` byte, but it arrives
+ *       after the pixels are in the panel, which is a leftover from bb_epaper
+ *       re-sending the init at refresh time. `refresh` is carried here at START
+ *       instead, which is where it can still affect anything.
+ *
+ *       MULTI-PASS IS ONE TRANSFER, NOT THREE. A 3-pass mode drives the panel
+ *       three times with different pixel data; the host declares
+ *       passes * frame_bytes and streams the frames back to back, and the
+ *       device advances to the next pass at each frame boundary. One session
+ *       means one zlib stream across all three frames -- which matters, because
+ *       consecutive passes of the same image are highly correlated -- and it
+ *       keeps the panel rail up across the sequence without a keep-power flag.
+ *       The device never has to guess how many frames are still coming: it
+ *       knows the pass count from config and the host declared the total.
+ *
+ *       The host does NOT need to hardcode pass counts. It reads the
+ *       display_mode packet out of the config, or takes `passes` from this
+ *       command's ACK.
+ *
+ * @flags: bit0 COMPRESSED  payload carries uncompressed_size + zlib stream
+ *         bit1 PIPELINED   data arrives via 0x81 windowed frames, not 0x71.
+ *                          Only legal where 0x0080 is supported -- which is
+ *                          Firmware ONLY; Silabs/NRF54/NRF52811 must leave this
+ *                          clear and stream over 0x0071.
+ *         bits2-7 reserved, must be 0.
+ * @rsv:   2 bytes, must be 0. (Per-upload temperature was a candidate here;
+ *         resolved instead by device-side temp_policy enforcement + the ACK's
+ *         temp_c -- see @response.)
+ * @state: a new START aborts any in-flight transfer. Data flows via 0x0071
+ *         (or 0x0081 when PIPELINED), and the session finalises with 0x0072.
+ *         A sequence containing an escape this target does not implement is
+ *         refused AT START with 0x07 SEQ_UNSUPPORTED, before any panel I/O
+ *         (see the drive-sequence escape table in opendisplay_structs.h).
+ * @timing: a pass boundary is a panel REFRESH and can land on ANY data chunk;
+ *         hosts must size per-chunk ack timeouts for the slowest declared
+ *         mode, not for link latency (observed refreshes: ~2.5 s to 35 s).
+ * @targets:  Silabs   (Firmware/NRF54/NRF52811: pending)
+ * @since:    2.3 (DRIVER_MIGRATION.md Rev 2)
+ * -------------------------------------------------------------------------- */
+#define CMD_DRIVE_WRITE_START          0x0085u
+
+/* CMD_DRIVE_WRITE_START flags (request byte 4). */
+#define DRIVE_WRITE_FLAG_COMPRESSED    0x01u
+#define DRIVE_WRITE_FLAG_PIPELINED     0x02u   /* Firmware target only */
+
 /* ==========================================================================
  * SECTION 2 -- RESPONSE / STATUS BYTES (8-bit)
  * ==========================================================================
@@ -710,6 +920,7 @@
 #define RESP_FIRMWARE_VERSION          0x43u
 #define RESP_MSD_READ                  0x44u
 #define RESP_CONFIG_CLEAR              0x45u
+#define RESP_READ_IDENT                0x46u
 #define RESP_AUTHENTICATE              0x50u
 #define RESP_ENTER_DFU                 0x51u
 #define RESP_POWER_OFF                 0x52u
@@ -730,6 +941,10 @@
 
 /* NFC endpoint echo byte (was 0x82u in protocol v1; see CMD_NFC_ENDPOINT). */
 #define RESP_NFC_ENDPOINT              0x83u
+
+/* Raw-SPI / config-driven drive echo bytes. */
+#define RESP_SPI_RAW                   0x84u
+#define RESP_DRIVE_WRITE_START         0x85u
 
 /* @collision: RESPONSE byte 0x73 has two meanings, disambiguated by direction
  *   and context:
@@ -826,6 +1041,31 @@
  *     NACK frame: [0xFF][0x52][err][0x00].
  * -------------------------------------------------------------------------- */
 #define OD_ERR_POWER_OFF_UNSUPPORTED   0x00u   /* no D-FF power latch on this target */
+
+/* --------------------------------------------------------------------------
+ * 4e. DRIVE-WRITE errors -- scope: CMD_DRIVE_WRITE_START (0x0085) ONLY.
+ *     NACK frame: [0xFF][0x85][err][mode].  Byte values overlap 4a/4b as
+ *     usual -- scoped by the echoed opcode.
+ * -------------------------------------------------------------------------- */
+#define OD_ERR_DRIVE_BAD_ARGS          0x01u   /* short payload / reserved != 0 */
+#define OD_ERR_DRIVE_NO_CONFIG         0x02u   /* no display, or no drive data */
+#define OD_ERR_DRIVE_BAD_MODE          0x03u   /* mode_index not in config */
+#define OD_ERR_DRIVE_BAD_SIZE          0x04u   /* declared size != passes*frame */
+#define OD_ERR_DRIVE_UNSUPPORTED       0x05u   /* e.g. PIPELINED on this target */
+#define OD_ERR_DRIVE_TEMP_RANGE        0x06u   /* temp outside mode range, temp_policy = REJECT */
+#define OD_ERR_DRIVE_SEQ_UNSUPPORTED   0x07u   /* sequence contains an escape this target
+                                                * does not implement; refused at START,
+                                                * before any panel I/O */
+
+/* --------------------------------------------------------------------------
+ * 4f. RAW-SPI errors -- scope: CMD_SPI_RAW (0x0084) ONLY.
+ *     NACK frame: [0xFF][0x84][err][sub]  (4th byte echoes the sub-opcode).
+ * -------------------------------------------------------------------------- */
+#define OD_ERR_SPI_RAW_BAD_ARGS        0x01u   /* missing/short args */
+#define OD_ERR_SPI_RAW_NOT_OPEN        0x02u   /* CMD/DATA/BUSY/RESET without OPEN */
+#define OD_ERR_SPI_RAW_NO_CONFIG       0x03u   /* no display configured */
+#define OD_ERR_SPI_RAW_PANEL           0x04u   /* panel bring-up / bad panel type */
+#define OD_ERR_SPI_RAW_UNKNOWN_SUB     0x05u
 
 /* ==========================================================================
  * SECTION 5 -- NFC SUB-PROTOCOL (rides CMD_NFC_ENDPOINT 0x0083)

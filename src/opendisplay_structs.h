@@ -19,15 +19,15 @@
  *   type mirrors (see docs/shared-types-plan.md); codegen must carry the prose
  *   through as idiomatic doc comments in each target language.
  *
- *   OD_STRUCTS_VERSION  2.2   (MAJOR.MINOR spec marker for THIS file; see
+ *   OD_STRUCTS_VERSION  2.3   (MAJOR.MINOR spec marker for THIS file; see
  *                              VERSIONING POLICY below -- NOT sent on the wire)
- *   LAST CHANGED        2026-11-03
+ *   LAST CHANGED        2026-11-06
  *
  *   The two version schemes carried here are DISTINCT (see §6 Q2 of the plan):
  *     - OD_STRUCTS_VERSION_* : documents this spec file, like protocol.h's
  *       OD_PROTOCOL_VERSION. A compatibility marker; never transmitted.
  *     - OD_CONFIG_VERSION / OD_CONFIG_MINOR_VERSION : the ON-WIRE config-format
- *       version (currently 1 / 4). The OuterPacketHeader.version byte transmits
+ *       version (currently 1 / 6). The OuterPacketHeader.version byte transmits
  *       the MAJOR; the minor is negotiated/inspected by peers.
  *
  * --------------------------------------------------------------------------
@@ -66,9 +66,33 @@
  * CHANGELOG  (newest first; entries accrue under "Unreleased" and roll into a
  *            new version heading on each bump -- see AGENT INSTRUCTIONS below)
  * --------------------------------------------------------------------------
- *   Unreleased (since 2.2)
+ *   Unreleased (since 2.3)
  *     - Add each payload-layout change here as it lands. On the next version bump,
  *       move these under a new "MAJOR.MINOR (YYYY-MM-DD)" heading.
+ *
+ *   2.3  (2026-11-06)  -- action table + image-store payloads (Firmware_Unified BG22)
+ *     - Config packet 0xB2 = OD_PKT_ACTION_TABLE (length-prefixed, SINGLETON):
+ *       a sequence of ActionEntryHead (6 B) + step_count x ActionStep (4 B)
+ *       records -- trigger -> ordered effects with centisecond delays, run by
+ *       the device with no host connected. New enums ActionTrigger
+ *       (OD_ACTION_TRIG_*), ActionEffect (OD_ACTION_EFF_*), bits
+ *       ActionEntryFlags (OD_ACTION_FLAG_ENABLED), limit OD_ACTION_STEPS_MAX (8).
+ *       Documented rules: at most one 0xB2 (the device resolves by FIRST match,
+ *       so a second is silently shadowed -- clients REPLACE, never append);
+ *       structural faults stop the walk; unknown trigger/effect is accepted but
+ *       INACTIVE. Landed from Firmware_Unified (od_action.h, BG22_ACTION_SYSTEM.md)
+ *       where it shipped first as a target-local id.
+ *     - Message payloads for the protocol.h 2.4 image-store/action opcodes:
+ *       FlashInfoResponse (CMD_FLASH_INFO, 10 B), FlashSlotRecord
+ *       (CMD_FLASH_LIST, 6 B per slot), ActionInfoResponse (CMD_ACTION_INFO,
+ *       7 B), and the FlashSlotState enum (bit-lattice slot states).
+ *     - OD_CONFIG_MINOR_VERSION 5 -> 6: catches up with the "@since 1.6" tags
+ *       that 2.2 already put on the 0x80+ range and the drive packets (2.2 left
+ *       the constant at 5), and covers 0xB2.
+ *     - Fix: OD_STRUCTS_VERSION_MINOR/_STR were left at 1 / "2.1" by the 2.2
+ *       entry above; they now read 3 / "2.3".
+ *     - Doc-only: the drive-sequence banner notes which escapes are refused by
+ *       which executor (OD_ERR_DRIVE_SEQ_UNSUPPORTED is the portable signal).
  *
  *   2.2  (2026-11-03)  -- config-driven display driver (DRIVER_MIGRATION.md Rev 2)
  *     - LENGTH-PREFIXED PACKET RANGE: packet-type ids 0x80-0xFF now carry a
@@ -298,8 +322,8 @@
 /* Payload-spec revision, MAJOR.MINOR. Documents THIS file; NOT sent on the wire.
  * Distinct from the on-wire OD_CONFIG_VERSION pair defined in SECTION 1. */
 #define OD_STRUCTS_VERSION_MAJOR       2u
-#define OD_STRUCTS_VERSION_MINOR       1u
-#define OD_STRUCTS_VERSION_STR         "2.1"
+#define OD_STRUCTS_VERSION_MINOR       3u
+#define OD_STRUCTS_VERSION_STR         "2.3"
 
 /* --------------------------------------------------------------------------
  * Portable compile-time size check. Defined once here; every packed struct is
@@ -334,10 +358,10 @@
 
 /* On-wire config-format version. UNLIKE OD_STRUCTS_VERSION / OD_PROTOCOL_VERSION,
  * these ARE transmitted / negotiated: OuterPacketHeader.version carries the
- * MAJOR byte. At 1.5 as of this header (the app's bundled config.yaml is at
+ * MAJOR byte. At 1.6 as of this header (the app's bundled config.yaml is at
  * minor 3 and must catch up). */
 #define OD_CONFIG_VERSION              1u   /* @doc "outer-packet major version byte" */
-#define OD_CONFIG_MINOR_VERSION        5u   /* @doc "config-format minor; backward-compatible additions" */
+#define OD_CONFIG_MINOR_VERSION        6u   /* @doc "config-format minor; backward-compatible additions" */
 
 /* CRC over the outer packet. CRC16-CCITT, poly 0x1021, init 0xFFFF, computed
  * over length+version+packets AS IF the 2-byte length field were 0x0000 (the
@@ -431,7 +455,8 @@ enum ConfigPacketType {
     OD_PKT_DISPLAY_MODE   = 0xAE, /**< @doc "display_mode (length-prefixed; repeatable, max 32): one drive mode -- name, colour scheme, pass count, waveform slots, temperature window, drive sequence." @since 1.6 */
     OD_PKT_DISPLAY_LUT    = 0xAF, /**< @doc "display_lut (length-prefixed; repeatable, max 8): one waveform slot at its real size." @since 1.6 */
     OD_PKT_DISPLAY_CAL    = 0xB0, /**< @doc "display_calibration (length-prefixed; repeatable, max 32): per-mode palette -- per-pass codes + measured CIELAB. HOST-ONLY: the device skips it." @since 1.6 */
-    OD_PKT_DISPLAY_PANEL  = 0xB1  /**< @doc "display_panel (length-prefixed; repeatable, max 4): per-panel drive properties -- BUSY trust/sense, colour code map, sleep sequence." @since 1.6 */
+    OD_PKT_DISPLAY_PANEL  = 0xB1, /**< @doc "display_panel (length-prefixed; repeatable, max 4): per-panel drive properties -- BUSY trust/sense, colour code map, sleep sequence." @since 1.6 */
+    OD_PKT_ACTION_TABLE   = 0xB2  /**< @doc "action_table (length-prefixed; SINGLETON -- at most one per config, and a client replaces it rather than appending a second): trigger -> effect sequences the device runs locally. Body = ActionEntryHead + ActionStep records; see the 0xB2 section." @since 1.6 */
 };
 
 /* ==========================================================================
@@ -1232,6 +1257,11 @@ OD_STATIC_ASSERT(sizeof(struct FindMyConfig) == 128, "FindMyConfig wire size");
  * An executor MUST pre-validate a sequence and refuse it wholesale -- NACK
  * OD_ERR_DRIVE_SEQ_UNSUPPORTED, BEFORE any panel I/O -- if it contains an
  * escape it does not know or has not implemented. No partial execution.
+ * Executor status (doc-only): Firmware_Unified's efr32bg22-slc target
+ * implements CS_SELECT (0x08), READ_SCRATCH (0x09) and WRITE_SCRATCH (0x0A)
+ * -- HARDWARE-UNVERIFIED. Other executors may still refuse them; the START-time
+ * OD_ERR_DRIVE_SEQ_UNSUPPORTED NACK is the portable signal, so a host needs no
+ * per-target escape table.
  * ========================================================================== */
 
 /** @enum DriveSeqEscape  @width 1
@@ -1376,6 +1406,109 @@ struct DisplayPanelHead {
 OD_STATIC_ASSERT(sizeof(struct DisplayPanelHead) == 13, "DisplayPanelHead wire size");
 
 /* ==========================================================================
+ * 0xB2  ACTION TABLE  (length-prefixed range, SinglePacketHeaderEx)
+ * ==========================================================================
+ * Trigger -> ordered effects, run by the DEVICE with no host connected (flash
+ * an LED on a button press, show a stored image when the temperature leaves a
+ * window). Not a VM: no jumps, loops or conditionals, so a table's worst-case
+ * run time is step_count x 2.55 s by inspection.
+ *
+ * BODY = a concatenation of entries, each ActionEntryHead (6 B) followed by
+ * step_count ActionStep records (4 B). Multi-byte fields little-endian. Total
+ * body length travels in SinglePacketHeaderEx.length.
+ *
+ * RULES
+ *  1. SINGLETON. A config carries AT MOST ONE 0xB2. The device resolves the
+ *     packet by FIRST match, so a second 0xB2 is legal on the wire, silent,
+ *     and useless: the device keeps running the first and CMD_ACTION_INFO
+ *     (0x004C) describes only that one. A client that replaces the table MUST
+ *     remove the existing 0xB2 and write exactly one -- never append. (A
+ *     host that round-trips unknown 0x80+ packets verbatim and then adds a new
+ *     table hits exactly this.)
+ *  2. STRUCTURAL FAULTS STOP THE WALK. An entry whose entry_len < 6, runs past
+ *     the body, differs from 6 + 4*step_count, or whose step_count exceeds
+ *     OD_ACTION_STEPS_MAX is REJECTED, and NO entry after it is read (one bad
+ *     entry_len desynchronises everything that follows). Fewer than 6 bytes
+ *     left at the end are ignored. Writers MUST emit entry_len = 6 + 4*steps.
+ *  3. UNKNOWN IS NOT BROKEN. An entry whose trigger or any step's effect this
+ *     build does not know -- or cannot perform here (e.g. BUZZER on a board
+ *     without one, TEMP_* with no temperature source) -- is ACCEPTED, kept,
+ *     and counted INACTIVE: it never runs on this build, but a firmware that
+ *     learns it starts running it with no config rewrite.
+ *  4. MATCHING. An event (trigger, arg) starts the FIRST entry that is ENABLED,
+ *     has that trigger, and whose trigger_arg is 0 ("any") or EQUALS arg.
+ *     Equality, not a mask test. An entry with step_count 0 never runs.
+ *  5. ONE AT A TIME. An event arriving while a sequence runs is DROPPED, not
+ *     queued. Events are recorded at the edge and started from the main loop.
+ *  6. The ENABLED bit is read LIVE before every step: a config write that
+ *     clears it stops a sequence already running.
+ *  7. Each step runs its effect, then waits delay_cs x 10 ms. Every step yields
+ *     to the main loop, even with delay 0.
+ *  8. TEMP_ENTER / TEMP_EXIT are EDGES, not levels; the first temperature
+ *     sample after boot or a config write only sets the baseline.
+ * Implementation notes (Firmware_Unified efr32bg22-slc, the only executor):
+ * temperature is the DIE sensor polled every 2 s with NO hysteresis, so a
+ * reading dithering at a window edge fires repeatedly; and the inside/outside
+ * edge state is shared by all temperature entries, so only one window per
+ * table behaves correctly. Both are recorded firmware defects, not contract.
+ * ========================================================================== */
+
+/** @enum ActionTrigger  @width 1
+ *  @doc "ActionEntryHead.trigger: the event that starts an entry, and what its
+ *  trigger_arg means for it." */
+enum ActionTrigger {
+    OD_ACTION_TRIG_NONE         = 0, /**< @doc "never fires; such an entry counts as INACTIVE." */
+    OD_ACTION_TRIG_BOOT         = 1, /**< @doc "once, after the stack is up. arg unused (0)." */
+    OD_ACTION_TRIG_BUTTON_PRESS = 2, /**< @doc "physical button press edge. arg = (1 << button_id), button_id as reported in the MSD button byte (instance*8 + input bit, 0..7); 0 = any button. Matched by EQUALITY: one bit per entry, not a multi-button mask." */
+    OD_ACTION_TRIG_BUTTON_LONG  = 3, /**< @doc "button held. arg = hold time in centiseconds. RESERVED: no firmware emits this event yet." */
+    OD_ACTION_TRIG_NFC_FIELD    = 4, /**< @doc "NFC field-detect rising edge. arg unused (0)." */
+    OD_ACTION_TRIG_HOST         = 5, /**< @doc "fired by CMD_ACTION_FIRE (0x004D). arg = host_id (low byte only; the opcode carries one byte), 0 = any." */
+    OD_ACTION_TRIG_TEMP_ENTER   = 6, /**< @doc "temperature moved from outside to inside a window. arg low byte = min C, high byte = max C, both SIGNED int8, inclusive." */
+    OD_ACTION_TRIG_TEMP_EXIT    = 7  /**< @doc "temperature moved from inside to outside the window; arg as TEMP_ENTER." */
+};
+
+/** @enum ActionEffect  @width 1
+ *  @doc "ActionStep.effect: what one step does before its delay." */
+enum ActionEffect {
+    OD_ACTION_EFF_NONE         = 0, /**< @doc "nothing; the step is a pure delay. arg0/arg1 unused." */
+    OD_ACTION_EFF_LED          = 1, /**< @doc "one short flash on LED instance 0. arg0 = colour/channel byte (LedFlashPattern.color1 encoding), arg1 = brightness 1..16 (0 -> 1, >16 -> 16)." */
+    OD_ACTION_EFF_LED_STOP     = 2, /**< @doc "stop LED instance 0. args unused." */
+    OD_ACTION_EFF_DISPLAY_SLOT = 3, /**< @doc "queue image-store slot arg0 for display, as CMD_FLASH_DISPLAY (0x004B) does; silently skipped if that request would NACK. arg1 unused." */
+    OD_ACTION_EFF_BUZZER       = 4  /**< @doc "play melody id arg0. INACTIVE on a board without a buzzer." */
+};
+
+/* Step ceiling per entry: entry_len is therefore at most 6 + 8*4 = 38 bytes. */
+#define OD_ACTION_STEPS_MAX            8u   /* @doc "maximum ActionEntryHead.step_count; more is a structural fault" */
+
+/* ActionEntryHead.flags @bits ActionEntryFlags (bits 1-7 reserved, write 0). */
+#define OD_ACTION_FLAG_ENABLED      (1u << 0) /* @doc "entry may fire; read live before every step, so clearing it stops a running sequence." */
+
+/** @struct ActionEntryHead  @packet 0xB2  @since 1.6
+ *  @doc "HEAD of one action-table entry. The 0xB2 body is a concatenation of
+ *  entries, each this 6-byte head + step_count x ActionStep. entry_len MUST be
+ *  6 + 4*step_count; see the 0xB2 section for the walk, match and singleton
+ *  rules." */
+struct ActionEntryHead {
+    uint8_t  entry_len;   /**< @doc "total bytes of this entry INCLUDING this head: 6 + 4*step_count (max 38)." */
+    uint8_t  trigger;     /**< @enum ActionTrigger @doc "event that starts this entry." */
+    uint16_t trigger_arg; /**< @endian le @doc "trigger-specific argument (see ActionTrigger); 0 = any for button/host." */
+    uint8_t  flags;       /**< @bits ActionEntryFlags @doc "bit0 = enabled." */
+    uint8_t  step_count;  /**< @max 8 @doc "number of ActionStep records following (<= OD_ACTION_STEPS_MAX)." */
+} __attribute__((packed));
+OD_STATIC_ASSERT(sizeof(struct ActionEntryHead) == 6, "ActionEntryHead wire size");
+
+/** @struct ActionStep  @since 1.6
+ *  @doc "One step of an action entry: run `effect`, then wait delay_cs
+ *  centiseconds (so one step waits at most 2.55 s)." */
+struct ActionStep {
+    uint8_t effect;   /**< @enum ActionEffect @doc "what this step does." */
+    uint8_t arg0;     /**< @doc "first effect argument (see ActionEffect)." */
+    uint8_t arg1;     /**< @doc "second effect argument (see ActionEffect)." */
+    uint8_t delay_cs; /**< @unit cs @doc "wait AFTER the effect, x10 ms (0..2550 ms)." */
+} __attribute__((packed));
+OD_STATIC_ASSERT(sizeof(struct ActionStep) == 4, "ActionStep wire size");
+
+/* ==========================================================================
  * SECTION 5 -- MESSAGE PAYLOAD STRUCTS  (fixed-size opcode payloads)
  * ==========================================================================
  * The single machine-readable home for the fixed-layout bodies of the opcodes
@@ -1505,6 +1638,55 @@ struct AuthProof {
     uint8_t mac[16];          /**< @doc "AES-CMAC(master_key, server_nonce || client_nonce || device_id)." */
 } __attribute__((packed));
 OD_STATIC_ASSERT(sizeof(struct AuthProof) == 32, "AuthProof wire size");
+
+/** @enum FlashSlotState  @width 1
+ *  @doc "FlashSlotRecord.state. A BIT LATTICE, not labels: NOR programming
+ *  only clears bits, so each state is reachable from the previous one without
+ *  an erase (FREE 0xFF -> WRITING 0xFE -> VALID 0xFC -> BAD 0x00). Any other
+ *  value is not displayable." */
+enum FlashSlotState {
+    OD_FLASH_SLOT_BAD     = 0x00, /**< @doc "marked unusable (reserved; current firmware never writes it)." */
+    OD_FLASH_SLOT_VALID   = 0xFC, /**< @doc "holds a complete frame; digest is its CRC-32." */
+    OD_FLASH_SLOT_WRITING = 0xFE, /**< @doc "a write started and never finished (torn or aborted); reusable as free." */
+    OD_FLASH_SLOT_FREE    = 0xFF  /**< @doc "erased / never written." */
+};
+
+/** @struct FlashInfoResponse  @message CMD_FLASH_INFO  @endian le
+ *  @doc "10-byte CMD_FLASH_INFO 0x0047 response DATA (device->host), after the
+ *  [status][echo] framing. When mounted = 0 the other fields are not
+ *  meaningful." */
+struct FlashInfoResponse {
+    uint8_t  mounted;     /**< @min 0 @max 1 @doc "1 = image store usable." */
+    uint8_t  slot_count;  /**< @max 32 @doc "number of slots (<= OD_FLASH_MAX_SLOTS)." */
+    uint32_t slot_stride; /**< @endian le @doc "bytes per slot, a whole number of 4 KiB sectors, INCLUDING the 32-byte slot header (max frame = slot_stride - 32)." */
+    uint32_t capacity;    /**< @endian le @doc "flash part size in bytes." */
+} __attribute__((packed));
+OD_STATIC_ASSERT(sizeof(struct FlashInfoResponse) == 10, "FlashInfoResponse wire size");
+
+/** @struct FlashSlotRecord  @message CMD_FLASH_LIST  @endian le
+ *  @doc "One 6-byte record of the CMD_FLASH_LIST 0x0048 response, which is
+ *  [count:1] then count of these (device->host)." */
+struct FlashSlotRecord {
+    uint8_t  index;  /**< @doc "slot index (0-based)." */
+    uint8_t  state;  /**< @enum FlashSlotState @doc "slot state." */
+    uint32_t digest; /**< @endian le @doc "CRC-32/ISO-HDLC (zlib.crc32) of the stored uncompressed frame; meaningful only when state = VALID (FREE reports 0, WRITING 0xFFFFFFFF)." */
+} __attribute__((packed));
+OD_STATIC_ASSERT(sizeof(struct FlashSlotRecord) == 6, "FlashSlotRecord wire size");
+
+/** @struct ActionInfoResponse  @message CMD_ACTION_INFO
+ *  @doc "7-byte CMD_ACTION_INFO 0x004C response DATA (device->host): load
+ *  statistics of the FIRST 0xB2 action table plus runner observability. All
+ *  counters reset on boot and on every config write." */
+struct ActionInfoResponse {
+    uint8_t entries;      /**< @doc "structurally valid entries loaded (= active + inactive)." */
+    uint8_t active;       /**< @doc "entries this build can run." */
+    uint8_t inactive;     /**< @doc "valid entries with an unknown or unperformable trigger/effect." */
+    uint8_t rejected;     /**< @max 1 @doc "1 if the walk stopped at a structural fault (later entries are not counted at all), else 0." */
+    uint8_t last_trigger; /**< @enum ActionTrigger @doc "trigger that last started a sequence; 0 = none yet." */
+    uint8_t fire_count;   /**< @doc "sequences started, mod 256." */
+    uint8_t last_temp_c;  /**< @unit C @doc "latest temperature sample, SIGNED int8 two's complement; 0 before the first sample." */
+} __attribute__((packed));
+OD_STATIC_ASSERT(sizeof(struct ActionInfoResponse) == 7, "ActionInfoResponse wire size");
 
 /* ==========================================================================
  * SECTION 6 -- BLE MANUFACTURER-SPECIFIC ADVERTISEMENT (MSD)

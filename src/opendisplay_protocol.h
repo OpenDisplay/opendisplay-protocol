@@ -9,8 +9,8 @@
  *   image PIPE. A new engineer or an AI agent should be able to implement a
  *   fully-correct client from THIS FILE ALONE, without reading firmware.
  *
- *   OD_PROTOCOL_VERSION 2.3   (MAJOR.MINOR; see VERSIONING POLICY below)
- *   LAST CHANGED        2026-11-03
+ *   OD_PROTOCOL_VERSION 2.4   (MAJOR.MINOR; see VERSIONING POLICY below)
+ *   LAST CHANGED        2026-11-06
  *
  * --------------------------------------------------------------------------
  * VERSIONING POLICY
@@ -52,9 +52,31 @@
  * CHANGELOG  (newest first; entries accrue under "Unreleased" and roll into a
  *            new version heading on each bump -- see AGENT INSTRUCTIONS below)
  * --------------------------------------------------------------------------
- *   Unreleased (since 2.3)
+ *   Unreleased (since 2.4)
  *     - Add each further wire-spec change here as it lands. On the next version
  *       bump, move these under a new "MAJOR.MINOR (YYYY-MM-DD)" heading.
+ *
+ *   2.4  (2026-11-06)  -- image store + action table (Firmware_Unified BG22)
+ *     - MINOR: seven new opcodes in the free 0x0047..0x004F gap, landed from
+ *       Firmware_Unified's efr32bg22-slc target where they shipped first as
+ *       target-local experimental values (shared/core/od_dispatch_ops.h):
+ *         0x0047 CMD_FLASH_INFO     store geometry (mounted/slots/stride/size)
+ *         0x0048 CMD_FLASH_LIST     per-slot [index][state][crc32]
+ *         0x0049 CMD_FLASH_ERASE    one slot, or all (FLASH_ERASE_ALL 0xFF)
+ *         0x004A CMD_FLASH_PRELOAD  divert the NEXT 0x0070 upload into a slot
+ *         0x004B CMD_FLASH_DISPLAY  queue a stored slot for display
+ *         0x004C CMD_ACTION_INFO    0xB2 action-table load/fire statistics
+ *         0x004D CMD_ACTION_FIRE    fire the HOST trigger
+ *       plus RESP_ echoes 0x47..0x4D, FLASH_ERASE_ALL and OD_FLASH_MAX_SLOTS.
+ *       Ordinary session-gated commands with bare NACKs (no error namespace).
+ *       @collision notes on 0x0049 (ERASE_ALL ACK) and 0x004D (host_id
+ *       0xFE/0xFF) vs the gate's 3-byte [00][cmd][FE|FF] frames.
+ *       Payload layouts (FlashInfoResponse, FlashSlotRecord, ActionInfoResponse)
+ *       and the 0xB2 action-table packet live in opendisplay_structs.h 2.3.
+ *       Specified with the STANDARD status bytes (0x00 ACK / 0xFF NACK); the
+ *       shipping BG22 handlers use 0x01/0x00 and are flagged @conformance in
+ *       the family banner as a firmware defect.
+ *     - Doc-only: FIRMWARE TARGET LEGEND gains "Unified" (Firmware_Unified).
  *
  *   2.3  (2026-11-03)  -- config-driven display driver (DRIVER_MIGRATION.md Rev 2)
  *     - CMD_DRIVE_WRITE_START (0x0085): full-frame write naming a config-declared
@@ -269,6 +291,11 @@
  *   NRF52811   : Firmware_NRF (nRF52811, minimal). Config r/w/chunk (NO 0x0045),
  *                direct-write, LED_ACTIVATE (NO LED_STOP), reboot, fw-ver, MSD,
  *                auth, DFU, deep-sleep. NO NFC / PIPE / partial / buzzer.
+ *   Unified    : Firmware_Unified, the one-repo replacement for the four
+ *                above (targets esp32-idf / nordic-zephyr / efr32bg22-slc).
+ *                Listed only where it implements something the four do not;
+ *                the per-target build capability is named on the @targets
+ *                line (e.g. "Unified (efr32bg22-slc, OD_CAP_IMGSTORE)").
  *
  * --------------------------------------------------------------------------
  * TAG CONVENTION (every opcode block below is uniform + line-anchored so that
@@ -291,8 +318,8 @@
  * when to bump which number. This marker describes the spec and is NOT sent on
  * the wire (the negotiated 0x0080 PIPE_VERSION is a separate field). */
 #define OD_PROTOCOL_VERSION_MAJOR      2u
-#define OD_PROTOCOL_VERSION_MINOR      3u
-#define OD_PROTOCOL_VERSION_STR        "2.3"
+#define OD_PROTOCOL_VERSION_MINOR      4u
+#define OD_PROTOCOL_VERSION_STR        "2.4"
 
 /* ==========================================================================
  * SECTION 1 -- COMMAND OPCODES (16-bit, big-endian on the wire)
@@ -438,6 +465,212 @@
 #define OD_IDENT_TARGET_NRF54          0x02u
 #define OD_IDENT_TARGET_SILABS         0x03u
 #define OD_IDENT_TARGET_NRF52811       0x04u
+
+/* --------------------------------------------------------------------------
+ * IMAGE STORE + ACTION FAMILY  (0x0047 .. 0x004D)            @since 2.4
+ *
+ * Seven opcodes over two device-local subsystems that ship together:
+ *   - an IMAGE STORE: fixed slots of panel-ready frames in external SPI NOR,
+ *     so an image can be uploaded once and shown later -- by command
+ *     (0x004B) or by an action -- with no host connected;
+ *   - an ACTION TABLE: config packet 0xB2 (ActionEntryHead/ActionStep in
+ *     opendisplay_structs.h), trigger -> effect sequences the device runs
+ *     locally. 0x004C/0x004D observe and exercise it.
+ * Rules shared by all seven:
+ *   - FRAMING is the ordinary [status][echo][data...], status RESP_ACK (0x00)
+ *     or RESP_NACK (0xFF). There is NO error-code namespace: every NACK is the
+ *     bare frame listed in its block, and the device reports no reason.
+ *   - GATING is the ordinary session gate: with encryption enabled an
+ *     unauthenticated caller gets RESP_AUTH_REQUIRED. None is plaintext-exempt.
+ *   - A target without the store does not route these opcodes; they get that
+ *     target's unknown-opcode treatment (on Firmware_Unified: NO reply at all,
+ *     not a NACK). Hosts must time out rather than wait forever.
+ *   - Slot indices are 0-based and < slot_count from 0x0047.
+ *   - DIGEST = CRC-32/ISO-HDLC (zlib.crc32: reflected poly 0xEDB88320, init
+ *     and xorout 0xFFFFFFFF) over the slot's stored payload: the UNCOMPRESSED
+ *     panel-ready frame (the device stores after inflating), so a host can
+ *     predict it before uploading.
+ * @conformance: the only implementation (Firmware_Unified efr32bg22-slc,
+ *   targets/efr32bg22-slc/od_cmd_flash.c, at eb512a2) sends status 0x01 for
+ *   ACK and 0x00 for NACK on all seven -- the INVERSE of this framing. That is
+ *   a firmware defect, not the contract: a host following this file sees an
+ *   unknown status (0x01) on success and would read 0x00-NACKs as ACKs.
+ * -------------------------------------------------------------------------- */
+
+/* --------------------------------------------------------------------------
+ * @opcode: 0x0047   @name: CMD_FLASH_INFO   @dir: host->device
+ * @request:  [0x00][0x47]  (no payload; extra bytes ignored)
+ * @response: [0x00][0x47][mounted:1][slot_count:1][slot_stride:4 LE][capacity:4 LE]
+ *            (12 bytes; data layout = FlashInfoResponse, opendisplay_structs.h)
+ *              mounted     = 1 when the store is usable, 0 otherwise (no
+ *                            flash fitted / probe failed / payload does not fit).
+ *              slot_count  = number of slots (<= OD_FLASH_MAX_SLOTS).
+ *              slot_stride = bytes per slot, a whole number of 4 KiB sectors;
+ *                            includes a 32-byte slot header, so the largest
+ *                            storable frame is slot_stride - 32.
+ *              capacity    = flash part size in bytes.
+ *            When mounted = 0 the other three fields are NOT meaningful (they
+ *            may hold partial probe results) and every other store opcode
+ *            fails.
+ * @errors:   none -- always ACKs, including with no flash fitted.
+ * @state:    the store is sized for the CURRENT display geometry. A config that
+ *            changes the panel (width/height/colour scheme) reformats it at the
+ *            next mount, dropping every slot.
+ * @targets:  Unified (efr32bg22-slc, built with OD_CAP_IMGSTORE)
+ *            (NOT Firmware, NOT NRF54, NOT Silabs, NOT NRF52811)
+ * @since:    2.4
+ * -------------------------------------------------------------------------- */
+#define CMD_FLASH_INFO                 0x0047u
+
+/* --------------------------------------------------------------------------
+ * @opcode: 0x0048   @name: CMD_FLASH_LIST   @dir: host->device
+ * @request:  [0x00][0x48]  (no payload)
+ * @response: [0x00][0x48][count:1] then count x 6-byte FlashSlotRecord:
+ *              [index:1][state:1][digest:4 LE]
+ *            Records are slots 0..count-1 in order. count == slot_count unless
+ *            a flash read failed mid-walk, which TRUNCATES the list -- do not
+ *            assume the two are equal. <= 3 + 32*6 = 195 bytes: one frame.
+ *              state  = FlashSlotState (opendisplay_structs.h): 0xFF FREE,
+ *                       0xFE WRITING (torn/aborted write, reusable as free),
+ *                       0xFC VALID, 0x00 BAD. Any other value: not displayable.
+ *              digest = see DIGEST in the family banner; meaningful ONLY for
+ *                       VALID. A FREE slot reports 0x00000000, a WRITING slot
+ *                       0xFFFFFFFF.
+ * @errors:   [0xFF][0x48] when the store is not mounted.
+ * @targets:  Unified (efr32bg22-slc, OD_CAP_IMGSTORE)
+ * @since:    2.4
+ * -------------------------------------------------------------------------- */
+#define CMD_FLASH_LIST                 0x0048u
+
+/* --------------------------------------------------------------------------
+ * @opcode: 0x0049   @name: CMD_FLASH_ERASE   @dir: host->device
+ * @request:  [0x00][0x49][index:1]   index = FLASH_ERASE_ALL (0xFF) erases
+ *            every slot.
+ * @response: [0x00][0x49][index:1]
+ * @errors:   [0xFF][0x49][index:1]  store not mounted, index >= slot_count,
+ *                                   a store write (PRELOAD upload) in progress,
+ *                                   or a flash erase failure.
+ *            [0xFF][0x49]           empty payload.
+ * @timing:   BLOCKING inside the handler: one 4 KiB sector erase (tens of ms)
+ *            per slot_stride/4096 sectors, per slot. FLASH_ERASE_ALL on a full
+ *            part takes seconds; size the ACK timeout for it. An ERASE_ALL that
+ *            fails part-way leaves the earlier slots erased.
+ * @collision: the ERASE_ALL ACK [0x00][0x49][0xFF] is byte-identical to the
+ *            session gate's plaintext refusal frame [0x00][cmd_lo][0xFF]
+ *            (decrypt / integrity failure). Inside a live session the real ACK
+ *            arrives ENCRYPTED, so a plaintext 3-byte [00][49][FF] is the gate
+ *            refusal; with no session it is the ACK. A host that cannot tell
+ *            which applies should confirm with CMD_FLASH_LIST.
+ * @targets:  Unified (efr32bg22-slc, OD_CAP_IMGSTORE)
+ * @since:    2.4
+ * -------------------------------------------------------------------------- */
+#define CMD_FLASH_ERASE                0x0049u
+
+/* CMD_FLASH_ERASE index sentinel (request byte 2). */
+#define FLASH_ERASE_ALL                0xFFu
+
+/* Image-store slot ceiling: slot_count never exceeds this, which is what keeps
+ * a CMD_FLASH_LIST response inside one frame (3 + 32*6 = 195 bytes). */
+#define OD_FLASH_MAX_SLOTS             32u
+
+/* --------------------------------------------------------------------------
+ * @opcode: 0x004A   @name: CMD_FLASH_PRELOAD   @dir: host->device
+ * @request:  [0x00][0x4A][slot:1]
+ * @response: [0x00][0x4A][slot:1]   the slot is ARMED (nothing written yet).
+ * @errors:   [0xFF][0x4A]  empty payload, store not mounted, or
+ *                          slot >= slot_count.
+ * @state:    ARMS a one-shot divert: the NEXT CMD_DIRECT_WRITE_START (0x0070)
+ *            full-frame upload is written to `slot` INSTEAD of the panel. The
+ *            panel is never powered or refreshed. The upload is an ordinary
+ *            direct write in every other respect (0x0071 DATA, 0x0072 END,
+ *            compression allowed -- the INFLATED frame is stored).
+ *              - The slot is erased at that START, so its old content is gone
+ *                even if the upload then fails.
+ *              - The END's completion notification reports the STORE:
+ *                RESP_DIRECT_WRITE_REFRESH_SUCCESS (0x73) = slot committed
+ *                VALID; RESP_DIRECT_WRITE_REFRESH_TIMEOUT (0x74) = it did not
+ *                (e.g. fewer bytes than declared; the slot is left WRITING).
+ *              - The arm is consumed by that START and cleared by any transfer
+ *                abort, including a disconnect. A second PRELOAD re-arms (last
+ *                one wins).
+ *              - It applies ONLY to 0x0070. CMD_DRIVE_WRITE_START (0x0085) and
+ *                partial writes are displayed normally and do NOT consume it.
+ *            The slot records the configured panel width/height/colour scheme,
+ *            which 0x004B later checks.
+ * @targets:  Unified (efr32bg22-slc, OD_CAP_IMGSTORE)
+ * @since:    2.4
+ * -------------------------------------------------------------------------- */
+#define CMD_FLASH_PRELOAD              0x004Au
+
+/* --------------------------------------------------------------------------
+ * @opcode: 0x004B   @name: CMD_FLASH_DISPLAY   @dir: host->device
+ * @request:  [0x00][0x4B][slot:1]
+ * @response: [0x00][0x4B][slot:1]   ACCEPTED and queued -- sent BEFORE the
+ *            refresh starts. A full refresh (10-20 s and more) runs afterwards
+ *            from the device's main loop. NO completion notification follows,
+ *            and a failure during that refresh is not reported.
+ * @errors:   [0xFF][0x4B][slot:1]  slot not VALID; slot recorded for a
+ *                                  different width/height/colour scheme than
+ *                                  the configured display; no display
+ *                                  configured; or a transfer is in progress.
+ *            [0xFF][0x4B]          empty payload.
+ * @state:    one pending display at a time: a second request before the queued
+ *            one starts replaces it. The display effect of an action (0xB2
+ *            OD_ACTION_EFF_DISPLAY_SLOT) goes through the same queue.
+ * @targets:  Unified (efr32bg22-slc, OD_CAP_IMGSTORE)
+ * @since:    2.4
+ * -------------------------------------------------------------------------- */
+#define CMD_FLASH_DISPLAY              0x004Bu
+
+/* --------------------------------------------------------------------------
+ * @opcode: 0x004C   @name: CMD_ACTION_INFO   @dir: host->device
+ * @request:  [0x00][0x4C]  (no payload)
+ * @response: [0x00][0x4C][entries:1][active:1][inactive:1][rejected:1]
+ *                        [last_trigger:1][fire_count:1][last_temp_c:1]
+ *            (9 bytes; data layout = ActionInfoResponse, opendisplay_structs.h)
+ *              entries      = structurally valid entries loaded from the table.
+ *              active       = entries this build can run.
+ *              inactive     = valid entries with a trigger or effect this build
+ *                             does not know or cannot perform. active +
+ *                             inactive == entries.
+ *              rejected     = 0 or 1. The loader STOPS at the first structural
+ *                             fault, so entries after it are not counted at all.
+ *              last_trigger = ActionTrigger that last started a sequence
+ *                             (0 = none since boot / the last config write).
+ *              fire_count   = sequences started, mod 256.
+ *              last_temp_c  = latest temperature sample, int8 degrees C (0
+ *                             before the first sample).
+ *            All counters reset on boot and on every config write.
+ * @errors:   none -- always ACKs (all zero with no table).
+ * @state:    describes the FIRST 0xB2 packet only. A config carrying two shows
+ *            the first and silently shadows the second (see 0xB2 rule 1 in
+ *            opendisplay_structs.h).
+ * @targets:  Unified (efr32bg22-slc, OD_CAP_IMGSTORE)
+ * @since:    2.4
+ * -------------------------------------------------------------------------- */
+#define CMD_ACTION_INFO                0x004Cu
+
+/* --------------------------------------------------------------------------
+ * @opcode: 0x004D   @name: CMD_ACTION_FIRE   @dir: host->device
+ * @request:  [0x00][0x4D][host_id:1]   host_id optional; absent = 0.
+ * @response: [0x00][0x4D][host_id:1]
+ * @errors:   none -- always ACKs.
+ * @state:    RECORDS an OD_ACTION_TRIG_HOST event with arg = host_id; the
+ *            action runner picks it up on its next service pass and starts the
+ *            first ENABLED HOST entry whose trigger_arg is 0 ("any") or equals
+ *            host_id. The ACK therefore means "recorded", NOT "matched" or
+ *            "ran" -- confirm with 0x004C (fire_count / last_trigger). The
+ *            event is DROPPED if a sequence is already running, and a second
+ *            FIRE before the service pass replaces the first. host_id is one
+ *            byte, so a HOST entry with trigger_arg > 0x00FF can never fire.
+ * @collision: hosts SHOULD use host_id 0x00..0xFD. The ACKs for 0xFE / 0xFF,
+ *            [0x00][0x4D][0xFE|0xFF], are byte-identical to the session gate's
+ *            plaintext auth-required / refusal frames [0x00][cmd_lo][0xFE|0xFF].
+ * @purpose:  exercise a table without the physical event it is written for.
+ * @targets:  Unified (efr32bg22-slc, OD_CAP_IMGSTORE)
+ * @since:    2.4
+ * -------------------------------------------------------------------------- */
+#define CMD_ACTION_FIRE                0x004Du
 
 /* --------------------------------------------------------------------------
  * @opcode: 0x0050   @name: CMD_AUTHENTICATE   @dir: host->device
@@ -921,6 +1154,13 @@
 #define RESP_MSD_READ                  0x44u
 #define RESP_CONFIG_CLEAR              0x45u
 #define RESP_READ_IDENT                0x46u
+#define RESP_FLASH_INFO                0x47u
+#define RESP_FLASH_LIST                0x48u
+#define RESP_FLASH_ERASE               0x49u
+#define RESP_FLASH_PRELOAD             0x4Au
+#define RESP_FLASH_DISPLAY             0x4Bu
+#define RESP_ACTION_INFO               0x4Cu
+#define RESP_ACTION_FIRE               0x4Du
 #define RESP_AUTHENTICATE              0x50u
 #define RESP_ENTER_DFU                 0x51u
 #define RESP_POWER_OFF                 0x52u

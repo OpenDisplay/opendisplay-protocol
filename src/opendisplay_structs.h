@@ -97,6 +97,9 @@
  *       Together with OD_DEVICE_FLAG_PWR_LATCH, deep sleep arms the RTC and
  *       releases the latch; the RTC INT powers the board back on (M5Paper).
  *       Backward-compatible enum addition; publishes no MSD data.
+ *     - PanelIC 77: OD_PANEL_IC_EP42R3_400X300 (DEPG0420 / GDEY042Z98 4.2" B/W/R,
+ *       SSD1683; bb_epaper EP42R3_400x300). Firmware has mapped 0x004D since
+ *       2.27.1 using the raw value; backward-compatible enum addition.
  *     - Add each payload-layout change here as it lands. On the next version bump,
  *       move these under a new "MAJOR.MINOR (YYYY-MM-DD)" heading.
  *
@@ -678,6 +681,7 @@ enum PanelIC {
     OD_PANEL_IC_EP40_SPECTRA_400X600     = 74  , /**< @doc "GDEP040E01 Spectra 6 4\" 400x600" */
     OD_PANEL_IC_EP27_176X264             = 75  , /**< @doc "Badger2350 B/W 2.7\"" */
     OD_PANEL_IC_EP27_176X264_4GRAY       = 76  , /**< @doc "Badger2350 4-gray 2.7\"" */
+    OD_PANEL_IC_EP42R3_400X300           = 77  , /**< @doc "DEPG0420 / GDEY042Z98 4.2\" B/W/R 400x300 (SSD1683)" */
     OD_PANEL_IC_UC8176_420_BW            = 1000, /**< @doc "UC8176 4.2\" B/W (M3 / EPD-nRF5 driver line, values 1000-1030)" */
     OD_PANEL_IC_SSD1619_420_BWR          = 1001, /**< @doc "SSD1619 4.2\" B/W/R" */
     OD_PANEL_IC_UC8176_420_BWR           = 1002, /**< @doc "UC8176 4.2\" B/W/R" */

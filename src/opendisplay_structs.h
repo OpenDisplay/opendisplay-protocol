@@ -19,9 +19,9 @@
  *   type mirrors (see docs/shared-types-plan.md); codegen must carry the prose
  *   through as idiomatic doc comments in each target language.
  *
- *   OD_STRUCTS_VERSION  2.3   (MAJOR.MINOR spec marker for THIS file; see
+ *   OD_STRUCTS_VERSION  2.4   (MAJOR.MINOR spec marker for THIS file; see
  *                              VERSIONING POLICY below -- NOT sent on the wire)
- *   LAST CHANGED        2026-11-06
+ *   LAST CHANGED        2026-11-25
  *
  *   The two version schemes carried here are DISTINCT (see §6 Q2 of the plan):
  *     - OD_STRUCTS_VERSION_* : documents this spec file, like protocol.h's
@@ -66,9 +66,22 @@
  * CHANGELOG  (newest first; entries accrue under "Unreleased" and roll into a
  *            new version heading on each bump -- see AGENT INSTRUCTIONS below)
  * --------------------------------------------------------------------------
- *   Unreleased (since 2.3)
+ *   Unreleased (since 2.4)
  *     - Add each payload-layout change here as it lands. On the next version bump,
  *       move these under a new "MAJOR.MINOR (YYYY-MM-DD)" heading.
+ *
+ *   2.4  (2026-11-25)  -- 3-bit calibration codes (Spectra 6 multi-pass modes)
+ *     - DisplayCalibrationHead.cal_flags bit1 = OD_DRIVE_CAL_FLAG_CODES_3BIT
+ *       (carved from the reserved bits 1-7): DisplayCalibrationEntry.codes
+ *       packs 3-bit panel codes, pass p in bits [3p+2:3p], at most 5 passes.
+ *       Clear = the 2-bit layout, unchanged. For panels whose frame codes are
+ *       3 bits wide (BWGBRY / BWGBRY_SPLIT: K0 W1 Y2 R3 B5 G6; 4 and 7 leave
+ *       the pixel as it is). A host that does not know the bit MUST NOT use
+ *       the palette; hosts written before 2.4 only use 0xB0 for BWRY16 modes,
+ *       and no device reads 0xB0, so old peers are unaffected.
+ *     - Doc-only: display_mode.color_scheme 0xFF on a multi-pass mode means
+ *       each pass frame packs as the panel's scheme (e.g. BWGBRY_SPLIT); the
+ *       mode's colours come from its 0xB0 palette, not from the scheme.
  *
  *   2.3  (2026-11-06)  -- action table + image-store payloads (Firmware_Unified BG22)
  *     - Config packet 0xB2 = OD_PKT_ACTION_TABLE (length-prefixed, SINGLETON):
@@ -322,8 +335,8 @@
 /* Payload-spec revision, MAJOR.MINOR. Documents THIS file; NOT sent on the wire.
  * Distinct from the on-wire OD_CONFIG_VERSION pair defined in SECTION 1. */
 #define OD_STRUCTS_VERSION_MAJOR       2u
-#define OD_STRUCTS_VERSION_MINOR       3u
-#define OD_STRUCTS_VERSION_STR         "2.3"
+#define OD_STRUCTS_VERSION_MINOR       4u
+#define OD_STRUCTS_VERSION_STR         "2.4"
 
 /* --------------------------------------------------------------------------
  * Portable compile-time size check. Defined once here; every packed struct is
@@ -1317,8 +1330,9 @@ enum DriveTempPolicy {
 #define OD_PANEL_FLAG_BUSY_USABLE   (1u << 0) /* @doc "the BUSY line can be polled; else use busy_fixed_delay_ms blind waits." */
 #define OD_PANEL_FLAG_LUT_SUPPORTED (1u << 1) /* @doc "panel honours a custom waveform (display_lut slots are meaningful)." */
 
-/* DisplayCalibrationHead.cal_flags @bits DriveCalFlags (bits 1-7 reserved). */
+/* DisplayCalibrationHead.cal_flags @bits DriveCalFlags (bits 2-7 reserved). */
 #define OD_DRIVE_CAL_FLAG_MEASURED  (1u << 0) /* @doc "lab[] values were photometrically measured on THIS unit; 0 = borrowed/nominal placeholder." */
+#define OD_DRIVE_CAL_FLAG_CODES_3BIT (1u << 1) /* @doc "DisplayCalibrationEntry.codes packs 3-bit panel codes, pass p in bits [3p+2:3p], so a palette covers at most 5 passes; clear = 2-bit codes. Set for panels whose frame codes are 3 bits (BWGBRY, BWGBRY_SPLIT: 0 K, 1 W, 2 Y, 3 R, 5 B, 6 G; 4 and 7 leave the pixel unchanged, so a pass may use them to keep the previous pass's colour). A host that does not know this bit MUST NOT use the palette." @since 2.4 */
 
 /** @struct DisplayModeHead  @packet 0xAE  @repeatable max=32  @since 1.6
  *  @doc "HEAD of a display_mode packet: one drive mode of one display. Body =
@@ -1329,7 +1343,7 @@ struct DisplayModeHead {
     uint8_t  instance_number; /**< @doc "display instance this mode belongs to (DisplayConfig.instance_number)." */
     uint8_t  mode_index;      /**< @doc "mode id named by CMD_DRIVE_WRITE_START's mode byte; unique per display." */
     uint8_t  mode_name[12];   /**< @doc "human-readable mode name, NUL-padded ASCII (e.g. 'full', 'fast', '16colour')." */
-    uint8_t  color_scheme;    /**< @enum ColorScheme @doc "what this mode RENDERS (e.g. BWRY16 for a multi-pass 16-colour mode, GRAY16 for a grey mode on a BWR panel); 0xFF = inherit the panel's DisplayConfig.color_scheme. This is the one legitimate home for mode-level schemes like BWRY16 that must never enter 0x20." */
+    uint8_t  color_scheme;    /**< @enum ColorScheme @doc "what this mode RENDERS (e.g. BWRY16 for a multi-pass 16-colour mode, GRAY16 for a grey mode on a BWR panel); 0xFF = inherit the panel's DisplayConfig.color_scheme. A multi-pass mode with 0xFF packs every pass frame as the panel's scheme (e.g. BWGBRY_SPLIT nibbles) and takes its colours from its display_calibration (0xB0) palette. This is the one legitimate home for mode-level schemes like BWRY16 that must never enter 0x20." */
     uint8_t  passes;          /**< @min 1 @max 8 @doc "how many frames one transfer streams; the device re-runs the sequence per pass." */
     uint8_t  temp_min_c;      /**< @doc "lower temperature bound, SIGNED int8 two's complement, degrees C." */
     uint8_t  temp_max_c;      /**< @doc "upper temperature bound, SIGNED int8 two's complement, degrees C." */
@@ -1378,7 +1392,7 @@ OD_STATIC_ASSERT(sizeof(struct DisplayCalibrationHead) == 4, "DisplayCalibration
  *  do NOT apply display_panel.code_map to them (doing so swaps yellow and red
  *  on BWRY glass)." */
 struct DisplayCalibrationEntry {
-    uint16_t codes;           /**< @endian le @doc "packed 2-bit panel codes, pass p in bits [2p+1:2p] (LSB-first); 16 bits cover the 8-pass maximum." */
+    uint16_t codes;           /**< @endian le @doc "packed panel codes, LSB-first: 2-bit codes with pass p in bits [2p+1:2p] (16 bits cover the 8-pass maximum), or, when cal_flags has OD_DRIVE_CAL_FLAG_CODES_3BIT, 3-bit codes with pass p in bits [3p+2:3p] (at most 5 passes; bit 15 zero)." */
     uint16_t lab_l;           /**< @endian le @doc "CIELAB L* x100, SIGNED int16 two's complement." */
     uint16_t lab_a;           /**< @endian le @doc "CIELAB a* x100, SIGNED int16 two's complement." */
     uint16_t lab_b;           /**< @endian le @doc "CIELAB b* x100, SIGNED int16 two's complement." */

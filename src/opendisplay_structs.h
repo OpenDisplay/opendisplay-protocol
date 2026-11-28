@@ -84,6 +84,8 @@
  *       PlaneInvert. Any value or bit not defined here, and any non-zero byte
  *       in the remaining reserved[4], MUST make a reader refuse the config, so
  *       later additions fail loudly on readers that do not know them.
+ *     - PanelIC 78 OD_PANEL_IC_EP579YR_792X272 (GDEY0579F52), the first panel
+ *       that needs the frame layout.
  *     - ColorScheme 8 BWGBRY_SPLIT is retired: it is BWGBRY (4) with
  *       frame_split = HALVES. Readers from 3.0 refuse it in DisplayConfig; the
  *       value stays reserved and is never reused.
@@ -784,6 +786,7 @@ enum PanelIC {
     OD_PANEL_IC_EP40_SPECTRA_400X600     = 74  , /**< @doc "GDEP040E01 Spectra 6 4\" 400x600" */
     OD_PANEL_IC_EP27_176X264             = 75  , /**< @doc "Badger2350 B/W 2.7\"" */
     OD_PANEL_IC_EP27_176X264_4GRAY       = 76  , /**< @doc "Badger2350 4-gray 2.7\"" */
+    OD_PANEL_IC_EP579YR_792X272          = 78  , /**< @doc "GDEY0579F52 5.79\" BWRY (two IST7158; frame_split HALVES, row_order FOLD). 77 is taken by ep42r3_400x300 in the toolbox config.yaml." @since 2.5 */
     OD_PANEL_IC_UC8176_420_BW            = 1000, /**< @doc "UC8176 4.2\" B/W (M3 / EPD-nRF5 driver line, values 1000-1030)" */
     OD_PANEL_IC_SSD1619_420_BWR          = 1001, /**< @doc "SSD1619 4.2\" B/W/R" */
     OD_PANEL_IC_UC8176_420_BWR           = 1002, /**< @doc "UC8176 4.2\" B/W/R" */

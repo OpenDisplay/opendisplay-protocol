@@ -9,8 +9,8 @@
  *   image PIPE. A new engineer or an AI agent should be able to implement a
  *   fully-correct client from THIS FILE ALONE, without reading firmware.
  *
- *   OD_PROTOCOL_VERSION 2.4   (MAJOR.MINOR; see VERSIONING POLICY below)
- *   LAST CHANGED        2026-11-06
+ *   OD_PROTOCOL_VERSION 2.5   (MAJOR.MINOR; see VERSIONING POLICY below)
+ *   LAST CHANGED        2026-11-28
  *
  * --------------------------------------------------------------------------
  * VERSIONING POLICY
@@ -52,9 +52,39 @@
  * CHANGELOG  (newest first; entries accrue under "Unreleased" and roll into a
  *            new version heading on each bump -- see AGENT INSTRUCTIONS below)
  * --------------------------------------------------------------------------
- *   Unreleased (since 2.4)
+ *   Unreleased (since 2.5)
  *     - Add each further wire-spec change here as it lands. On the next version
  *       bump, move these under a new "MAJOR.MINOR (YYYY-MM-DD)" heading.
+ *     - ADDITIVE: CMD_READ_IDENT tail gains [board_len:1][board:board_len]
+ *       after escapes: the release board this image was built for, ASCII, as
+ *       in the release manifest's boards[].board (OD_IDENT_BOARD_MAX bytes at
+ *       most; 0 = unknown). Lets a host pick the update image when several
+ *       release boards share one chip. Read by length; no minor bump.
+ *     - Doc: CMD_DIRECT_WRITE_END: an upload ACK and REFRESH_SUCCESS do not
+ *       prove a panel is attached or that anything was drawn.
+ *
+ *   2.5  (2026-11-25)  -- drive-write etag (host-side priors)
+ *     - MINOR: CMD_DRIVE_WRITE_START (0x0085) flag bit3 ETAG with a 4-byte
+ *       old_etag (BE) after the header. A non-zero old_etag that is not the
+ *       displayed etag is refused with OD_ERR_DRIVE_ETAG_MISMATCH 0x09 before
+ *       any panel I/O (and the displayed etag is cleared). An accepted drive
+ *       write clears the displayed etag; 0x0072 END's optional new_etag sets
+ *       it once the refresh completes, as for 0x0070. Lets a host that sends
+ *       only changed pixels (hold codes, opendisplay_structs.h 0xAE tail)
+ *       prove the panel still shows its prior frame: a reboot, a boot or
+ *       claim screen, an image-store draw or another host's write all leave
+ *       etag 0. A host sends bit3 only to proto_minor >= 5 (CMD_READ_IDENT);
+ *       older firmware does not check flags and would take the etag for data.
+ *       Every target with OD_CAP_DRIVE_WRITE keeps a displayed etag now
+ *       (OD_CAP_DISPLAYED_ETAG), not only those with OD_CAP_PARTIAL.
+ *     - Doc: 0x0085 @flags names bit2 INLINE_LUT (rsv = inline table length).
+ *     - (rolled in from "Unreleased (since 2.4)":)
+ *     - Firmware 3.0 (Firmware_Unified, decided 2026-11-11): CMD_READ_IDENT tail (flags, limits, escapes)
+ *       and one fw_target per MCU family (0x05 nRF52840); upload START NACK
+ *       data bytes 0x08 NEEDS_MIGRATION and 0x09 PANEL_BUSY (section 4h);
+ *       OD_ERR_DRIVE_PANEL_BUSY 0x08 (4e); CONFIG_WRITE NACK byte (4g);
+ *       CMD_ACTION_INFO reply 10 bytes; CMD_POWER_OFF also cuts the MOSFET
+ *       latch (no wire change).
  *
  *   2.4  (2026-11-06)  -- image store + action table (Firmware_Unified BG22)
  *     - MINOR: seven new opcodes in the free 0x0047..0x004F gap, landed from
@@ -318,8 +348,8 @@
  * when to bump which number. This marker describes the spec and is NOT sent on
  * the wire (the negotiated 0x0080 PIPE_VERSION is a separate field). */
 #define OD_PROTOCOL_VERSION_MAJOR      2u
-#define OD_PROTOCOL_VERSION_MINOR      4u
-#define OD_PROTOCOL_VERSION_STR        "2.4"
+#define OD_PROTOCOL_VERSION_MINOR      5u
+#define OD_PROTOCOL_VERSION_STR        "2.5"
 
 /* ==========================================================================
  * SECTION 1 -- COMMAND OPCODES (16-bit, big-endian on the wire)
@@ -370,7 +400,9 @@
  *                 single-frame path and NACK the following 0x42 chunks.
  *              -> remaining bytes follow as CMD_CONFIG_CHUNK (0x0042) frames.
  * @response: [0x00][0x41] on accept (or after last chunk); [0xFF][0x41] on error.
- * @errors:   NACK on malformed TLV, size overflow, or bad chunk sequencing.
+ * @errors:   NACK on malformed TLV, size overflow, or bad chunk sequencing:
+ *            [0xFF][0x41][err][0x00], err = OD_ERR_CONFIG_WRITE_* (SECTION 4g);
+ *            0x01 BUSY while a display pass reads the stored config.
  * @state:    session required when security enabled. Device computes
  *            expectedChunks = ceil(total / 200).
  * @limits:   CONFIG_CHUNK_SIZE 200; first chunk payload CONFIG_CHUNK_SIZE_WITH_PREFIX 202.
@@ -454,17 +486,54 @@
  *            provisioning (e.g. Solum tags, UICR CUSTOMER data on nRF) answer
  *            from factory data, which is the actual point -- those devices
  *            know their panel before any config is ever written.
- * @limits:   max 4 displays -> response <= 5 + 4*7 = 33 bytes; fits one frame.
- * @targets:  Silabs      (Firmware/NRF54/NRF52811: pending adoption)
- * @since:    2.3 (DRIVER_MIGRATION.md Rev 2, review point R8)
+ *            3.0 TAIL (after the records; a reader that stops at
+ *            5 + count*7 ignores it, and a 2.x device simply ends there):
+ *              [flags:1][max_config:2 LE][max_seq_steps:2 LE][escapes:1]
+ *            flags   = OD_IDENT_FLAG_* below;
+ *            max_config    = largest config CONFIG_WRITE accepts, in bytes
+ *                            (min of the stored-config cap and the chunked
+ *                            transfer ceiling MAX_CONFIG_CHUNKS*CONFIG_CHUNK_SIZE);
+ *            max_seq_steps = most steps one drive sequence may have;
+ *            escapes = OD_IDENT_ESC_* drive-sequence escapes compiled in
+ *                      beyond the base set.
+ *            then (Unreleased, after 2.5):
+ *              [board_len:1][board:board_len]
+ *            board = the release board this image was built for, ASCII
+ *                    [a-z0-9_-], exactly the release manifest's boards[].board
+ *                    (e.g. "s3-n32r8-extuart", "xiao_nrf52840", "bg22"). A
+ *                    debug build reports the release board of the same
+ *                    hardware. board_len 0 = not a release board (DIY build);
+ *                    board_len <= OD_IDENT_BOARD_MAX. Absent on older 3.0
+ *                    firmware: a reply ending after escapes means unknown.
+ *            Further bytes may follow in later versions: read by length.
+ * @limits:   max 4 displays -> response <= 5 + 4*7 + 6 + 1 + 32 = 72 bytes;
+ *            fits one frame.
+ * @targets:  every 3.0 target (Firmware_Unified); Silabs 2.3+
+ * @since:    2.3 (DRIVER_MIGRATION.md Rev 2, review point R8); tail 3.0
  * -------------------------------------------------------------------------- */
 #define CMD_READ_IDENT                 0x0046u
 
-/* CMD_READ_IDENT fw_target values (response byte 3). */
-#define OD_IDENT_TARGET_FIRMWARE       0x01u   /* nRF52840+ESP32 "Firmware" */
+/* CMD_READ_IDENT fw_target values (response byte 3): one per MCU family. */
+#define OD_IDENT_TARGET_ESP32          0x01u
+#define OD_IDENT_TARGET_FIRMWARE       OD_IDENT_TARGET_ESP32   /* 2.x name ("Firmware" repo) */
 #define OD_IDENT_TARGET_NRF54          0x02u
-#define OD_IDENT_TARGET_SILABS         0x03u
+#define OD_IDENT_TARGET_SILABS         0x03u   /* EFR32BG22 */
 #define OD_IDENT_TARGET_NRF52811       0x04u
+#define OD_IDENT_TARGET_NRF52840       0x05u   /* @since 3.0; 2.x nRF52840 builds answered 0x01 */
+
+/* CMD_READ_IDENT tail: flags byte. */
+#define OD_IDENT_FLAG_CONFIG_DRIVEN    0x01u   /* panels are driven from drive packets 0xAE-0xB1 */
+#define OD_IDENT_FLAG_NEEDS_MIGRATION  0x02u   /* a configured display cannot be drawn: no drive
+                                                * packets, or mode 0 breaks the mode-0 rule */
+#define OD_IDENT_FLAG_BUILTIN_DRIVER   0x04u   /* a display is driven by a native controller
+                                                * driver selected by config packet 0xB3 */
+
+/* CMD_READ_IDENT tail: longest board name after board_len. */
+#define OD_IDENT_BOARD_MAX             32u
+
+/* CMD_READ_IDENT tail: escapes byte. */
+#define OD_IDENT_ESC_WINDOW            0x01u   /* drive-sequence escape 0x0C WINDOW */
+#define OD_IDENT_ESC_FILL              0x02u   /* drive-sequence escape 0x0D FILL */
 
 /* --------------------------------------------------------------------------
  * IMAGE STORE + ACTION FAMILY  (0x0047 .. 0x004D)            @since 2.4
@@ -626,25 +695,30 @@
  * @opcode: 0x004C   @name: CMD_ACTION_INFO   @dir: host->device
  * @request:  [0x00][0x4C]  (no payload)
  * @response: [0x00][0x4C][entries:1][active:1][inactive:1][rejected:1]
- *                        [last_trigger:1][fire_count:1][last_temp_c:1]
- *            (9 bytes; data layout = ActionInfoResponse, opendisplay_structs.h)
+ *                        [last_trigger:1][fire_count:1][last_temp_c:1][tables:1]
+ *            (10 bytes; data layout = ActionInfoResponse, opendisplay_structs.h;
+ *            2.4 firmware sent 9, without `tables`)
  *              entries      = structurally valid entries loaded from the table.
  *              active       = entries this build can run.
  *              inactive     = valid entries with a trigger or effect this build
  *                             does not know or cannot perform. active +
  *                             inactive == entries.
- *              rejected     = 0 or 1. The loader STOPS at the first structural
- *                             fault, so entries after it are not counted at all.
+ *              rejected     = malformed entries skipped. A malformed entry
+ *                             drops only itself; the walk continues.
  *              last_trigger = ActionTrigger that last started a sequence
  *                             (0 = none since boot / the last config write).
  *              fire_count   = sequences started, mod 256.
  *              last_temp_c  = latest temperature sample, int8 degrees C (0
  *                             before the first sample).
+ *              tables       = number of 0xB2 packets in the config; only the
+ *                             first runs.
  *            All counters reset on boot and on every config write.
  * @errors:   none -- always ACKs (all zero with no table).
- * @state:    describes the FIRST 0xB2 packet only. A config carrying two shows
- *            the first and silently shadows the second (see 0xB2 rule 1 in
- *            opendisplay_structs.h).
+ * @state:    describes the FIRST 0xB2 packet only. A config carrying two runs
+ *            the first and counts both in `tables` (see 0xB2 rule 1 in
+ *            opendisplay_structs.h). Trigger entries for BUTTON_LONG count as
+ *            inactive; temperature triggers fire on the edge and re-arm 3 C
+ *            past it.
  * @targets:  Unified (efr32bg22-slc, OD_CAP_IMGSTORE)
  * @since:    2.4
  * -------------------------------------------------------------------------- */
@@ -718,16 +792,17 @@
  *              [0xFF][0x52][0x00][0x00]  no power latch on this target.
  *              [0xFE][0x52]              auth required (no live session).
  * @errors:   NACK data[0] scoped to opcode 0x52 (OD_ERR_POWER_OFF_*, see
- *            SECTION 4d): 0x00 UNSUPPORTED (no D-FF latch). A target that
+ *            SECTION 4d): 0x00 UNSUPPORTED (no power latch). A target that
  *            refuses 0x52 may still accept 0x53 deep sleep -- do not conflate
  *            "power-off unsupported" with "cannot sleep".
  * @state:    session required when security enabled. Cuts the power rail via
- *            the D-FF latch; the device wakes ONLY on a physical button press
- *            (fresh cold boot). No timer, no wake interval -- power-off is
- *            absolute.
+ *            the D-FF latch, or (3.0) the MOSFET latch by driving pwr_pin_2
+ *            low; the device wakes ONLY on a physical button press (fresh cold
+ *            boot). No timer, no wake interval -- power-off is absolute. On USB
+ *            a MOSFET-latch board stays powered and parks in deep sleep.
  * @limits:   trailing payload reserved/ignored.
- * @targets:  Firmware (ESP32, D-FF power-latch HW ONLY). All other targets
- *            (non-latch/mains ESP32, Silabs, nRF) NACK [0xFF][0x52][0x00].
+ * @targets:  Firmware (ESP32 with a D-FF or MOSFET power latch). All other
+ *            targets (non-latch/mains ESP32, Silabs, nRF) NACK [0xFF][0x52][0x00].
  * @since:    new in 2.1 -- splits the hard rail-cut out of CMD_DEEP_SLEEP so
  *            latch HW gets timed-wake sleep via 0x0053 and an explicit,
  *            capability-gated hard-off via 0x0052.
@@ -820,8 +895,13 @@
  *            length). refresh: 0=FULL, 1=FAST/PARTIAL.
  * @response: [0x00][0x72] (RESP_DIRECT_WRITE_END_ACK, data complete) THEN an
  *            unsolicited refresh notification:
- *              [0x00][0x73] RESP_DIRECT_WRITE_REFRESH_SUCCESS (panel updated), or
+ *              [0x00][0x73] RESP_DIRECT_WRITE_REFRESH_SUCCESS (refresh sequence
+ *                           ran and BUSY released), or
  *              [0x00][0x74] RESP_DIRECT_WRITE_REFRESH_TIMEOUT (refresh timed out).
+ *            Neither proves that anything was drawn: no target can tell whether a
+ *            panel is attached, and with none BUSY reads idle, so the ACKs and 0x73
+ *            arrive as for a real panel. The same holds for every upload path
+ *            (0x0076 partial, 0x0080 PIPE, 0x0085 drive write).
  *            [0xFF][0x72] if the transfer was incomplete (missing bytes / zlib flush).
  * @errors:   NACK on incompleteness; refresh reported via 0x73/0x74.
  * @state:    finalizes the 0x70 session and triggers the panel refresh.
@@ -1068,6 +1148,7 @@
 /* --------------------------------------------------------------------------
  * @opcode: 0x0085   @name: CMD_DRIVE_WRITE_START   @dir: host->device
  * @request:  [0x00][0x85][mode:1][refresh:1][flags:1][rsv:2]
+ *              [old_etag:4 BE]            present IFF flags bit3 ETAG (2.5)
  *              [uncompressed_size:4 LE]   present IFF flags bit0 COMPRESSED
  *              [first data bytes...]
  * @response: [0x00][0x85][mode:1][passes:1][temp_c:1] on accept.
@@ -1112,8 +1193,19 @@
  *                          Only legal where 0x0080 is supported -- which is
  *                          Firmware ONLY; Silabs/NRF54/NRF52811 must leave this
  *                          clear and stream over 0x0071.
- *         bits2-7 reserved, must be 0.
- * @rsv:   2 bytes, must be 0. (Per-upload temperature was a candidate here;
+ *         bit2 INLINE_LUT  the stream starts with rsv (LE) bytes of raw tables
+ *                          that stand in for the stored 0xAF slots (targets
+ *                          with a waveform cache; others refuse UNSUPPORTED).
+ *         bit3 ETAG        old_etag follows the header (2.5). Non-zero and not
+ *                          the displayed etag -> 0x09 ETAG_MISMATCH, refused
+ *                          before any panel I/O; 0 = the host claims nothing.
+ *                          Any accepted 0x0085 clears the displayed etag; set
+ *                          a new one with 0x0072 END's new_etag. Send only to
+ *                          proto_minor >= 5: older firmware ignores flags it
+ *                          does not know and would read old_etag as data.
+ *         bits4-7 reserved, must be 0; refused BAD_ARGS from 2.5 on, so a
+ *                          later flag cannot be misread by this firmware.
+ * @rsv:   2 bytes, must be 0 unless INLINE_LUT. (Per-upload temperature was a candidate here;
  *         resolved instead by device-side temp_policy enforcement + the ACK's
  *         temp_c -- see @response.)
  * @state: a new START aborts any in-flight transfer. Data flows via 0x0071
@@ -1132,6 +1224,8 @@
 /* CMD_DRIVE_WRITE_START flags (request byte 4). */
 #define DRIVE_WRITE_FLAG_COMPRESSED    0x01u
 #define DRIVE_WRITE_FLAG_PIPELINED     0x02u   /* Firmware target only */
+#define DRIVE_WRITE_FLAG_ETAG          0x08u   /* old_etag:4 BE after the header (2.5) */
+#define DRIVE_WRITE_FLAG_RESERVED      0xF0u   /* bits 4-7: refused BAD_ARGS (2.5) */
 
 /* ==========================================================================
  * SECTION 2 -- RESPONSE / STATUS BYTES (8-bit)
@@ -1296,6 +1390,36 @@
 #define OD_ERR_DRIVE_SEQ_UNSUPPORTED   0x07u   /* sequence contains an escape this target
                                                 * does not implement; refused at START,
                                                 * before any panel I/O */
+#define OD_ERR_DRIVE_PANEL_BUSY        0x08u   /* the panel stayed BUSY while pass 0 was
+                                                * brought up; transient, retry */
+#define OD_ERR_DRIVE_ETAG_MISMATCH     0x09u   /* flags ETAG: old_etag != the displayed
+                                                * etag; the panel was not touched and the
+                                                * displayed etag is now 0 -- send a full
+                                                * frame (2.5) */
+
+/* --------------------------------------------------------------------------
+ * 4h. UPLOAD-START errors -- scope: the START of CMD_DIRECT_WRITE_START
+ *     (0x0070), CMD_PARTIAL_WRITE (0x0076) and PIPE (0x0080). The byte goes
+ *     where each START's NACK puts its error: [0xFF][0x70][err][0x00],
+ *     [0xFF][0x76][err][0x00] (4b namespace), [0xFF][0x80][err]... (4c).
+ *     Both values are free in every one of those sets.
+ * -------------------------------------------------------------------------- */
+#define OD_ERR_NEEDS_MIGRATION         0x08u   /* config has no drive packets for the
+                                                * display (or mode 0 breaks the mode-0
+                                                * rule): write a config with drive data */
+#define OD_ERR_PANEL_BUSY              0x09u   /* the panel stayed BUSY while the upload
+                                                * brought it up; transient, retry. Not
+                                                * sent by PIPE, which ACKs before the
+                                                * panel comes up */
+
+/* --------------------------------------------------------------------------
+ * 4g. CONFIG-WRITE errors -- scope: CMD_CONFIG_WRITE (0x0041) and
+ *     CMD_CONFIG_CHUNK (0x0042) when the write is committed.
+ *     NACK frame: [0xFF][0x41|0x42][err][0x00].
+ * -------------------------------------------------------------------------- */
+#define OD_ERR_CONFIG_WRITE_FAILED     0x00u   /* malformed, oversize or storage error */
+#define OD_ERR_CONFIG_WRITE_BUSY       0x01u   /* refused while a display pass reads the
+                                                * stored config; nothing stored, retry */
 
 /* --------------------------------------------------------------------------
  * 4f. RAW-SPI errors -- scope: CMD_SPI_RAW (0x0084) ONLY.
